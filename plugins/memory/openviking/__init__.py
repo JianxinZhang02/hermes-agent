@@ -47,7 +47,9 @@ from urllib.parse import quote, unquote, urlparse
 from urllib.request import url2pathname
 
 from agent.message_content import flatten_message_text
+from agent.knowledge_provider import KnowledgeBaseProvider, KnowledgeSearchResult
 from agent.memory_provider import MemoryProvider
+from agent.retrieval_scope import ProviderScope
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from tools.registry import tool_error
 from utils import atomic_json_write, env_var_enabled
@@ -1845,7 +1847,7 @@ def _run_create_profile_setup(
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
-class OpenVikingMemoryProvider(MemoryProvider):
+class OpenVikingMemoryProvider(MemoryProvider, KnowledgeBaseProvider):
     """Full bidirectional memory via OpenViking context database."""
 
     def backup_paths(self) -> List[str]:
@@ -2448,7 +2450,25 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._client = None
         return None
 
-    def system_prompt_block(self) -> str:
+    @property
+    def knowledge_name(self) -> str:
+        return self.name
+
+    def knowledge_is_available(self) -> bool:
+        return self.is_available()
+
+    def memory_system_prompt_block(self) -> str:
+        if not self._ensure_client():
+            return ""
+        return (
+            "# OpenViking Memory\n"
+            "OpenViking provides durable conversational memory. Use "
+            "viking_remember for important long-term facts and viking_forget "
+            "only for exact memory URIs. Retrieved memory is supplied in the "
+            "per-turn memory context."
+        )
+
+    def knowledge_system_prompt_block(self) -> str:
         if not self._ensure_client():
             return ""
         # Provide brief info about the knowledge base
@@ -2496,6 +2516,17 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 "from available evidence and state uncertainty if needed."
             )
 
+    def system_prompt_block(self) -> str:
+        """Legacy combined view for direct provider callers."""
+        return "\n\n".join(
+            block
+            for block in (
+                self.memory_system_prompt_block(),
+                self.knowledge_system_prompt_block(),
+            )
+            if block
+        )
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Return recall context for this query/session."""
         query_text = _derive_openviking_user_text(query).strip()
@@ -2511,12 +2542,33 @@ class OpenVikingMemoryProvider(MemoryProvider):
             result = self._search_prefetch_context(
                 query_text,
                 session_id=effective_session_id,
+                context_type="memory",
             )
             if result:
                 parts.append(result)
         if not parts:
             return ""
         return "## OpenViking Context\n" + "\n\n".join(parts)
+
+    def search_knowledge(
+        self,
+        query: str,
+        *,
+        scope: ProviderScope,
+    ) -> KnowledgeSearchResult:
+        """Retrieve indexed resources without mixing in user memories."""
+        if not self._recall_config()["resources"]:
+            return KnowledgeSearchResult(provider=self.knowledge_name)
+        content = self._search_prefetch_context(
+            query,
+            session_id=scope.session_id,
+            context_type="resource",
+        )
+        return KnowledgeSearchResult(
+            content=("## OpenViking Resources\n" + content) if content else "",
+            provider=self.knowledge_name,
+            metadata={"project_id": scope.project_id},
+        )
 
     @staticmethod
     def _remaining_recall_timeout(deadline: float, per_request_timeout: float) -> float:
@@ -3080,6 +3132,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         *,
         session_id: str = "",
         client: Optional[_VikingClient] = None,
+        context_type: Optional[str | List[str]] = None,
     ) -> str:
         query_text = (query or "").strip()
         if len(query_text) < _RECALL_QUERY_MIN_CHARS:
@@ -3103,7 +3156,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             candidate_limit = max(cfg["limit"] * 4, 20)
             deadline = time.monotonic() + cfg["timeout_seconds"]
             candidates: List[Dict[str, Any]] = []
-            context_type: str | List[str] = (
+            effective_context_type: str | List[str] = context_type or (
                 ["memory", "resource"] if cfg["resources"] else "memory"
             )
 
@@ -3112,14 +3165,24 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 query_text,
                 session_id,
                 limit=candidate_limit,
-                context_type=context_type,
+                context_type=effective_context_type,
                 deadline=deadline,
                 request_timeout=cfg["request_timeout_seconds"],
             )
             result = self._unwrap_result(resp)
             if not isinstance(result, dict):
                 return ""
-            for ctx_type in ("memories", "resources"):
+            requested_types = (
+                set(effective_context_type)
+                if isinstance(effective_context_type, list)
+                else {effective_context_type}
+            )
+            result_buckets = []
+            if "memory" in requested_types:
+                result_buckets.append("memories")
+            if "resource" in requested_types:
+                result_buckets.append("resources")
+            for ctx_type in result_buckets:
                 for item in result.get(ctx_type, []) or []:
                     if isinstance(item, dict):
                         candidates.append(item)
@@ -4253,6 +4316,19 @@ class OpenVikingMemoryProvider(MemoryProvider):
             FORGET_SCHEMA,
             ADD_RESOURCE_SCHEMA,
         ]
+
+    def get_memory_tool_schemas(self) -> List[Dict[str, Any]]:
+        return [REMEMBER_SCHEMA, FORGET_SCHEMA]
+
+    def get_knowledge_tool_schemas(self) -> List[Dict[str, Any]]:
+        return [SEARCH_SCHEMA, READ_SCHEMA, BROWSE_SCHEMA, ADD_RESOURCE_SCHEMA]
+
+    def handle_knowledge_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
+        return self.handle_tool_call(tool_name, args, **kwargs)
+
+    def ingest_resource(self, resource: Any, *, scope: ProviderScope) -> Any:
+        args = resource if isinstance(resource, dict) else {"url": str(resource)}
+        return json.loads(self._tool_add_resource(args))
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if not self._ensure_client():

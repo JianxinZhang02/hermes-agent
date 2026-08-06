@@ -6560,6 +6560,28 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
     except Exception:
         logger.debug("Memory-provider tool re-injection skipped", exc_info=True)
 
+    # Knowledge-provider tools share the existing memory toolset gate for
+    # backward compatibility with dual-capability providers such as
+    # OpenViking. Routing remains independent.
+    try:
+        knowledge_manager = getattr(agent, "_knowledge_base_manager", None)
+        get_kb_schemas = (
+            getattr(knowledge_manager, "get_all_tool_schemas", None)
+            if knowledge_manager else None
+        )
+        if callable(get_kb_schemas):
+            from agent.memory_manager import memory_provider_tools_enabled
+            if memory_provider_tools_enabled(
+                getattr(agent, "enabled_toolsets", None),
+                getattr(agent, "disabled_toolsets", None),
+                memory_tool_present="memory" in name_set,
+            ):
+                for schema in get_kb_schemas():
+                    if isinstance(schema, dict):
+                        _add(schema)
+    except Exception:
+        logger.debug("Knowledge-provider tool re-injection skipped", exc_info=True)
+
     # Context-engine tools (lcm_grep/lcm_describe/…) — the `context_engine`
     # toolset is intentionally empty, so these only exist via this append.
     # Honor the same enabled_toolsets gate agent_init uses (#5544): without it a

@@ -4017,6 +4017,12 @@ class AIAgent:
                 self._memory_manager.shutdown_all()
             except Exception:
                 pass
+        knowledge_manager = getattr(self, "_knowledge_base_manager", None)
+        if knowledge_manager:
+            try:
+                knowledge_manager.shutdown()
+            except Exception:
+                pass
         # Notify context engine of session end (flush DAG, close DBs, etc.)
         if hasattr(self, "context_compressor") and self.context_compressor:
             try:

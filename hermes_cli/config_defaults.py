@@ -1661,6 +1661,14 @@ DEFAULT_CONFIG = {
         "provider": "",
     },
 
+    # Indexed external resources.  With no knowledge-capable provider this is
+    # a no-op.  Existing dual-capability memory providers are adapted
+    # automatically, so users do not need to change memory.provider.
+    "knowledge": {
+        "enabled": True,
+        "max_context_chars": 12000,
+    },
+
     # Subagent delegation — override the provider:model used by delegate_task
     # so child agents can run on a different (cheaper/faster) provider and model.
     # Uses the same runtime provider resolution as CLI/gateway startup, so all

@@ -682,6 +682,13 @@ memory:
   # For exit/reset, only fires if the session had at least this many user turns.
   flush_min_turns: 6        # Min user turns to trigger flush on exit/reset (0 = disabled)
 
+# Indexed external resources are kept separate from conversational memory.
+# This has no effect unless the active provider exposes knowledge-base
+# capabilities (OpenViking does). Existing memory.provider config is reused.
+knowledge:
+  enabled: true
+  max_context_chars: 12000
+
 # =============================================================================
 # Session Reset Policy (Messaging Platforms)
 # =============================================================================

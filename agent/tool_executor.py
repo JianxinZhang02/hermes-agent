@@ -1484,17 +1484,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
         elif function_name == "memory":
             def _execute(next_args: dict) -> Any:
-                target = next_args.get("target", "memory")
-                operations = next_args.get("operations")
-                from tools.memory_tool import memory_tool as _memory_tool
-                result = _memory_tool(
-                    action=next_args.get("action"),
-                    target=target,
-                    content=next_args.get("content"),
-                    old_text=next_args.get("old_text"),
-                    operations=operations,
-                    store=agent._memory_store,
-                )
+                if agent._memory_manager:
+                    result = agent._memory_manager.handle_builtin_tool(next_args)
+                elif getattr(agent, "_builtin_memory_provider", None):
+                    result = agent._builtin_memory_provider.handle_tool_call(
+                        "memory", next_args
+                    )
+                else:
+                    from tools.registry import tool_error
+                    return tool_error("Memory is not available.", success=False)
                 # Mirror successful built-in memory writes to external
                 # providers. All gating/op-expansion lives behind the manager
                 # interface (MemoryManager.notify_memory_tool_write).
@@ -1675,6 +1673,25 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     spinner.stop(cute_msg)
                 elif agent._should_emit_quiet_tool_messages():
                     agent._vprint(f"  {cute_msg}")
+        elif (
+            getattr(agent, "_knowledge_base_manager", None)
+            and agent._knowledge_base_manager.has_tool(function_name)
+        ):
+            def _execute(next_args: dict) -> Any:
+                return agent._knowledge_base_manager.handle_tool_call(function_name, next_args)
+            function_result, function_args, middleware_trace, _execution_blocked = _managed_values(_run_agent_tool_execution_middleware(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                execute=_execute,
+                scope_block=_ts_scope_block,
+                display_index=i,
+            ))
+            tool_duration = time.time() - tool_start_time
+            if agent._should_emit_quiet_tool_messages():
+                agent._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
         elif agent.quiet_mode:
             spinner = None
             if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():

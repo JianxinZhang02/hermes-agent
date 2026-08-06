@@ -500,23 +500,22 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []
 
-    if agent._memory_store:
-        if agent._memory_enabled:
-            mem_block = agent._memory_store.format_for_system_prompt("memory")
-            if mem_block:
-                volatile_parts.append(mem_block)
-        # USER.md is always included when enabled.
-        if agent._user_profile_enabled:
-            user_block = agent._memory_store.format_for_system_prompt("user")
-            if user_block:
-                volatile_parts.append(user_block)
-
-    # External memory provider system prompt block (additive to built-in)
+    # Built-in and external memory are both adapted behind MemoryManager.
     if agent._memory_manager:
         try:
-            _ext_mem_block = agent._memory_manager.build_system_prompt()
-            if _ext_mem_block:
-                volatile_parts.append(_ext_mem_block)
+            _memory_block = agent._memory_manager.build_system_prompt()
+            if _memory_block:
+                volatile_parts.append(_memory_block)
+        except Exception:
+            pass
+
+    # Indexed resources have a distinct prompt boundary and lifecycle.
+    _kb_manager = getattr(agent, "_knowledge_base_manager", None)
+    if _kb_manager:
+        try:
+            _knowledge_block = _kb_manager.build_system_prompt()
+            if _knowledge_block:
+                volatile_parts.append(_knowledge_block)
         except Exception:
             pass
 
@@ -581,8 +580,9 @@ def invalidate_system_prompt(agent: Any) -> None:
     """
     agent._cached_system_prompt = None
     agent._cached_system_prompt_static = None
-    if agent._memory_store:
-        agent._memory_store.load_from_disk()
+    memory_manager = getattr(agent, "_memory_manager", None)
+    if memory_manager:
+        memory_manager.reload_builtin_snapshot()
 
 
 def reconstruct_static_prefix(

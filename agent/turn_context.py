@@ -41,6 +41,8 @@ from agent.conversation_compression import (
 from agent.context_engine import automatic_compaction_status_message
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
+from agent.knowledge_base_manager import build_knowledge_context_block
+from agent.knowledge_provider import KnowledgeSearchResult
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
@@ -53,6 +55,7 @@ def compose_user_api_content(
     content: Any,
     ext_prefetch_cache: str,
     plugin_user_context: str,
+    knowledge_context: KnowledgeSearchResult | str = "",
 ) -> Optional[str]:
     """Compose the API-bound content of the current turn's user message.
 
@@ -75,6 +78,10 @@ def compose_user_api_content(
     injections = []
     if ext_prefetch_cache:
         fenced = build_memory_context_block(ext_prefetch_cache)
+        if fenced:
+            injections.append(fenced)
+    if knowledge_context:
+        fenced = build_knowledge_context_block(knowledge_context)
         if fenced:
             injections.append(fenced)
     if plugin_user_context:
@@ -322,6 +329,8 @@ class TurnContext:
     plugin_user_context: str = ""
     # External-memory prefetch result, reused across loop iterations.
     ext_prefetch_cache: str = ""
+    # External-resource search result, distinct from conversational memory.
+    knowledge_context: KnowledgeSearchResult | str = ""
     # Turn-start preflight already proved an immediate retry ineffective.
     preflight_compression_blocked: bool = False
 
@@ -466,9 +475,8 @@ def build_turn_context(
     agent._unicode_sanitization_passes = 0
     agent._tool_guardrails.reset_for_turn()
     agent._tool_guardrail_halt_decision = None
-    _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
-    if callable(_reset_consol):
-        _reset_consol()
+    if agent._memory_manager:
+        agent._memory_manager.reset_builtin_turn_state()
     agent._vision_supported = True
 
     # Pre-turn connection health check: clean up dead TCP connections.
@@ -583,7 +591,8 @@ def build_turn_context(
     should_review_memory = False
     if (agent._memory_nudge_interval > 0
             and "memory" in agent.valid_tool_names
-            and agent._memory_store):
+            and agent._memory_manager
+            and agent._memory_manager.builtin_store is not None):
         agent._turns_since_memory += 1
         if agent._turns_since_memory >= agent._memory_nudge_interval:
             should_review_memory = True
@@ -1156,7 +1165,24 @@ def build_turn_context(
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
-            ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+            ext_prefetch_cache = agent._memory_manager.prefetch_all(
+                _query,
+                session_id=agent.session_id or "",
+                task_id=effective_task_id,
+            ) or ""
+        except Exception:
+            pass
+
+    knowledge_context: KnowledgeSearchResult | str = ""
+    _knowledge_manager = getattr(agent, "_knowledge_base_manager", None)
+    if _knowledge_manager:
+        try:
+            _query = original_user_message if isinstance(original_user_message, str) else ""
+            knowledge_context = _knowledge_manager.search(
+                _query,
+                session_id=agent.session_id or "",
+                task_id=effective_task_id,
+            )
         except Exception:
             pass
 
@@ -1185,7 +1211,10 @@ def build_turn_context(
     ):
         _turn_user_msg = messages[current_turn_user_idx]
         _api_content = compose_user_api_content(
-            _turn_user_msg.get("content", ""), ext_prefetch_cache, plugin_user_context
+            _turn_user_msg.get("content", ""),
+            ext_prefetch_cache,
+            plugin_user_context,
+            knowledge_context,
         )
         if _api_content is not None and _api_content != _turn_user_msg.get("content"):
             _turn_user_msg["api_content"] = _api_content
@@ -1258,5 +1287,6 @@ def build_turn_context(
         should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context,
         ext_prefetch_cache=ext_prefetch_cache,
+        knowledge_context=knowledge_context,
         preflight_compression_blocked=_preflight_compression_blocked,
     )

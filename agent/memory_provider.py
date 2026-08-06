@@ -37,6 +37,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
+from agent.retrieval_scope import ProviderScope
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +93,15 @@ class MemoryProvider(ABC):
         """
         return ""
 
+    def memory_system_prompt_block(self) -> str:
+        """Return only the provider's conversational-memory prompt block.
+
+        Dual-capability providers may override this to keep resource/knowledge
+        guidance out of the memory channel.  The default preserves every
+        existing provider's behavior.
+        """
+        return self.system_prompt_block()
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Recall relevant context for the upcoming turn.
 
@@ -104,6 +115,14 @@ class MemoryProvider(ABC):
         per-session scoping can ignore it.
         """
         return ""
+
+    def recall_memory(self, query: str, *, scope: ProviderScope) -> str:
+        """Scope-aware recall entry point used by ``MemoryManager``.
+
+        The default bridges to the legacy ``prefetch`` contract so installed
+        providers remain source-compatible.
+        """
+        return self.prefetch(query, session_id=scope.session_id)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.
@@ -140,6 +159,15 @@ class MemoryProvider(ABC):
 
         Return empty list if this provider has no tools (context-only).
         """
+
+    def get_memory_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Return schemas that mutate or query conversational memory.
+
+        Existing providers remain compatible because the default returns the
+        legacy undifferentiated schema list.  Providers that also implement a
+        knowledge base should override both capability-specific methods.
+        """
+        return self.get_tool_schemas()
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         """Handle a tool call for one of this provider's tools.

@@ -109,7 +109,10 @@ def agent_runtime_owns_post_tool_hook(agent: Any, function_name: str) -> bool:
     if getattr(agent, "_context_engine_tool_names", None) and function_name in agent._context_engine_tool_names:
         return True
     memory_manager = getattr(agent, "_memory_manager", None)
-    return bool(memory_manager and memory_manager.has_tool(function_name))
+    if memory_manager and memory_manager.has_tool(function_name):
+        return True
+    knowledge_manager = getattr(agent, "_knowledge_base_manager", None)
+    return bool(knowledge_manager and knowledge_manager.has_tool(function_name))
 
 
 def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_query: str, completed: bool) -> List[Dict[str, Any]]:
@@ -2859,17 +2862,18 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
     elif function_name == "memory":
         def _execute(next_args: dict) -> Any:
-            target = next_args.get("target", "memory")
-            operations = next_args.get("operations")
-            from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
-                action=next_args.get("action"),
-                target=target,
-                content=next_args.get("content"),
-                old_text=next_args.get("old_text"),
-                operations=operations,
-                store=agent._memory_store,
-            )
+            if agent._memory_manager:
+                result = agent._memory_manager.handle_builtin_tool(next_args)
+            elif getattr(agent, "_builtin_memory_provider", None):
+                result = agent._builtin_memory_provider.handle_tool_call(
+                    "memory", next_args
+                )
+            else:
+                from tools.registry import tool_error
+                return _finish_agent_tool(
+                    tool_error("Memory is not available.", success=False),
+                    next_args,
+                )
             # Mirror successful built-in memory writes to external providers.
             # All gating/op-expansion lives behind the manager interface
             # (MemoryManager.notify_memory_tool_write).
@@ -2886,6 +2890,15 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
         def _execute(next_args: dict) -> Any:
             return _finish_agent_tool(agent._memory_manager.handle_tool_call(function_name, next_args), next_args)
+    elif (
+        getattr(agent, "_knowledge_base_manager", None)
+        and agent._knowledge_base_manager.has_tool(function_name)
+    ):
+        def _execute(next_args: dict) -> Any:
+            return _finish_agent_tool(
+                agent._knowledge_base_manager.handle_tool_call(function_name, next_args),
+                next_args,
+            )
     elif function_name == "clarify":
         def _execute(next_args: dict) -> Any:
             from tools.clarify_tool import clarify_tool as _clarify_tool

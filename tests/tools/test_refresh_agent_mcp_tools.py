@@ -54,12 +54,17 @@ def test_refresh_preserves_memory_provider_and_context_engine_tools(monkeypatch)
     refresh. The helper must re-inject them.
     """
     # Agent already carries: a built-in, a memory-provider tool, a context tool.
-    agent = _agent(["read_file", "memory_search", "lcm_grep"])
+    agent = _agent(["read_file", "memory_search", "kb_search", "lcm_grep"])
 
     # Provider exposes its schemas; context compressor exposes lcm_*.
     agent._memory_manager = types.SimpleNamespace(
         get_all_tool_schemas=lambda: [
             {"name": "memory_search", "description": "", "parameters": {}}
+        ]
+    )
+    agent._knowledge_base_manager = types.SimpleNamespace(
+        get_all_tool_schemas=lambda: [
+            {"name": "kb_search", "description": "", "parameters": {}}
         ]
     )
     agent.context_compressor = types.SimpleNamespace(
@@ -82,6 +87,7 @@ def test_refresh_preserves_memory_provider_and_context_engine_tools(monkeypatch)
     # The new MCP tool landed AND the injected families survived.
     assert "mcp_new_server_tool" in agent.valid_tool_names
     assert "memory_search" in agent.valid_tool_names   # not clobbered
+    assert "kb_search" in agent.valid_tool_names       # independently routed
     assert "lcm_grep" in agent.valid_tool_names         # not clobbered
     assert added == {"mcp_new_server_tool"}
 

@@ -15,6 +15,7 @@ from plugins.memory.openviking import (
     _DEFERRED_COMMIT_TIMEOUT,
     _VikingClient,
 )
+from agent.retrieval_scope import ProviderScope
 
 
 def _clear_openviking_tenant_env(monkeypatch):
@@ -470,6 +471,42 @@ def test_get_tool_schemas_omits_profile_and_keeps_narrow_forget_tools():
 
     assert "viking_profile" not in names
     assert "viking_forget" in names
+
+    memory_names = {schema["name"] for schema in provider.get_memory_tool_schemas()}
+    knowledge_names = {schema["name"] for schema in provider.get_knowledge_tool_schemas()}
+    assert memory_names == {"viking_remember", "viking_forget"}
+    assert knowledge_names == {
+        "viking_search",
+        "viking_read",
+        "viking_browse",
+        "viking_add_resource",
+    }
+    assert memory_names.isdisjoint(knowledge_names)
+
+
+def test_automatic_memory_and_resource_recall_use_distinct_channels(monkeypatch):
+    provider = _make_prefetch_provider()
+    monkeypatch.setenv("OPENVIKING_RECALL_RESOURCES", "true")
+    monkeypatch.setattr(provider, "_ensure_client", lambda: provider._client)
+    monkeypatch.setattr(provider, "_session_start_memory_context", lambda session_id: "")
+    calls = []
+
+    def fake_search(query, **kwargs):
+        calls.append(kwargs["context_type"])
+        return f"{kwargs['context_type']}-result"
+
+    monkeypatch.setattr(provider, "_search_prefetch_context", fake_search)
+
+    memory = provider.prefetch("remember this", session_id="s1")
+    knowledge = provider.search_knowledge(
+        "find the document",
+        scope=ProviderScope(session_id="s1", project_id="p1"),
+    )
+
+    assert "memory-result" in memory
+    assert "resource-result" not in memory
+    assert "resource-result" in knowledge.content
+    assert calls == ["memory", "resource"]
 
 
 def test_viking_client_delete_uses_identity_headers(monkeypatch):

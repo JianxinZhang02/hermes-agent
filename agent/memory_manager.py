@@ -30,10 +30,12 @@ import logging
 import re
 import inspect
 import threading
+from dataclasses import replace
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
+from agent.retrieval_scope import ProviderScope
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from tools.registry import tool_error
 
@@ -368,8 +370,14 @@ class MemoryManager:
     provider is allowed.  Failures in one provider never block the other.
     """
 
-    def __init__(self, *, external_prefetch_timeout: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        *,
+        external_prefetch_timeout: Optional[float] = None,
+        scope: Optional[ProviderScope] = None,
+    ) -> None:
         self._providers: List[MemoryProvider] = []
+        self.scope = scope or ProviderScope()
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
         self._external_prefetch_timeout = (
@@ -400,6 +408,11 @@ class MemoryManager:
         }
 
     # -- Registration --------------------------------------------------------
+
+    @staticmethod
+    def _provider_tool_schemas(provider: MemoryProvider) -> List[Dict[str, Any]]:
+        getter = getattr(provider, "get_memory_tool_schemas", None)
+        return list(getter() if callable(getter) else provider.get_tool_schemas())
 
     def add_provider(self, provider: MemoryProvider) -> None:
         """Register a memory provider.
@@ -439,7 +452,7 @@ class MemoryManager:
         _core_tool_names = set(_HERMES_CORE_TOOLS)
 
         # Index tool names → provider for routing
-        for raw_schema in provider.get_tool_schemas():
+        for raw_schema in self._provider_tool_schemas(provider):
             schema = normalize_tool_schema(raw_schema)
             if schema is None:
                 continue
@@ -466,7 +479,7 @@ class MemoryManager:
         logger.info(
             "Memory provider '%s' registered (%d tools)",
             provider.name,
-            len(provider.get_tool_schemas()),
+            len(self._provider_tool_schemas(provider)),
         )
 
     @property
@@ -492,7 +505,8 @@ class MemoryManager:
         blocks = []
         for provider in self._providers:
             try:
-                block = provider.system_prompt_block()
+                builder = getattr(provider, "memory_system_prompt_block", None)
+                block = builder() if callable(builder) else provider.system_prompt_block()
                 if block and block.strip():
                     blocks.append(block)
             except Exception as e:
@@ -522,7 +536,14 @@ class MemoryManager:
         """
         return extract_user_instruction_from_skill_message(text)
 
-    def prefetch_all(self, query: str, *, session_id: str = "") -> str:
+    def prefetch_all(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        task_id: str = "",
+        scope: Optional[ProviderScope] = None,
+    ) -> str:
         """Collect prefetch context from all providers.
 
         Returns merged context text labeled by provider. Empty providers
@@ -531,10 +552,17 @@ class MemoryManager:
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
             return ""
+        effective_scope = scope or self.scope
+        if session_id or task_id:
+            effective_scope = replace(
+                effective_scope,
+                session_id=session_id or effective_scope.session_id,
+                task_id=task_id or effective_scope.task_id,
+            )
         parts = []
         for provider in self._providers:
             try:
-                result = self._prefetch_provider(provider, clean_query, session_id=session_id)
+                result = self._prefetch_provider(provider, clean_query, scope=effective_scope)
                 if result and result.strip():
                     parts.append(result)
             except Exception as e:
@@ -545,17 +573,23 @@ class MemoryManager:
         return "\n\n".join(parts)
 
     def _prefetch_provider(
-        self, provider: MemoryProvider, query: str, *, session_id: str = ""
+        self, provider: MemoryProvider, query: str, *, scope: ProviderScope
     ) -> str:
+        recall = getattr(provider, "recall_memory", None)
+        invoke = (
+            (lambda: recall(query, scope=scope))
+            if callable(recall)
+            else (lambda: provider.prefetch(query, session_id=scope.session_id))
+        )
         if provider.name == "builtin":
-            return provider.prefetch(query, session_id=session_id)
+            return invoke()
 
         result_box: Dict[str, str] = {}
         error_box: Dict[str, Exception] = {}
 
         def _run() -> None:
             try:
-                result_box["value"] = provider.prefetch(query, session_id=session_id) or ""
+                result_box["value"] = invoke() or ""
             except Exception as exc:  # pragma: no cover - re-raised by caller
                 error_box["value"] = exc
 
@@ -796,7 +830,7 @@ class MemoryManager:
         seen = set()
         for provider in self._providers:
             try:
-                for raw_schema in provider.get_tool_schemas():
+                for raw_schema in self._provider_tool_schemas(provider):
                     schema = normalize_tool_schema(raw_schema)
                     if schema is None:
                         logger.warning(
@@ -845,6 +879,37 @@ class MemoryManager:
                 provider.name, tool_name, e,
             )
             return tool_error(f"Memory tool '{tool_name}' failed: {e}")
+
+    def handle_builtin_tool(self, args: Dict[str, Any], **kwargs: Any) -> str:
+        """Route the stable core ``memory`` tool through the builtin adapter."""
+        provider = self.get_provider("builtin")
+        if provider is None:
+            return tool_error(
+                "Memory is not available. It may be disabled in config or this environment.",
+                success=False,
+            )
+        try:
+            return provider.handle_tool_call("memory", args, **kwargs)
+        except Exception as exc:
+            logger.error("Built-in memory tool failed: %s", exc)
+            return tool_error(f"Memory tool failed: {exc}", success=False)
+
+    @property
+    def builtin_store(self) -> Any:
+        provider = self.get_provider("builtin")
+        return getattr(provider, "store", None) if provider else None
+
+    def reload_builtin_snapshot(self) -> None:
+        """Refresh the built-in provider's frozen prompt snapshot."""
+        store = self.builtin_store
+        if store is not None:
+            store.load_from_disk()
+
+    def reset_builtin_turn_state(self) -> None:
+        """Reset per-turn consolidation guards without exposing the store."""
+        reset = getattr(self.builtin_store, "reset_consolidation_failures", None)
+        if callable(reset):
+            reset()
 
     # -- Lifecycle hooks -----------------------------------------------------
 
@@ -949,6 +1014,7 @@ class MemoryManager:
         """
         if not new_session_id:
             return
+        self.scope = replace(self.scope, session_id=new_session_id)
         # Only forward ``rewound`` when it's actually set. Passing it
         # unconditionally would inject ``rewound=False`` into every
         # provider's **kwargs for the common /resume, /branch, /new, and

@@ -144,10 +144,12 @@ def _delete_skill(name: str) -> dict[str, Any]:
 def _delete_memory(node_id: str) -> dict[str, Any]:
     source, gidx = _parse_memory_id(node_id)
     path, chunks, local = _locate_memory(source, gidx)
+    from tools.memory_tool import load_on_disk_store
 
-    del chunks[local]
-    _write_memory(path, chunks)
-
+    target = "user" if source == "profile" else "memory"
+    result = load_on_disk_store().remove(target, chunks[local])
+    if not result.get("success"):
+        return {"ok": False, "message": result.get("error", "delete failed")}
     return {"ok": True, "message": f"deleted memory from {path.name}"}
 
 
@@ -179,22 +181,16 @@ def _edit_memory(node_id: str, content: str) -> dict[str, Any]:
     if not body:
         return {"ok": False, "message": "empty memory — use delete to remove it"}
     path, chunks, local = _locate_memory(source, gidx)
+    from tools.memory_tool import load_on_disk_store
 
-    chunks[local] = body
-    _write_memory(path, chunks)
-
+    target = "user" if source == "profile" else "memory"
+    result = load_on_disk_store().replace(target, chunks[local], body)
+    if not result.get("success"):
+        return {"ok": False, "message": result.get("error", "edit failed")}
     return {"ok": True, "message": f"updated memory in {path.name}"}
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
-
-
-def _write_memory(path: Path, chunks: list[str]) -> None:
-    """Atomic temp-file + rename via the memory tool, so a concurrent reader
-    never sees a half-written file (and the §-join stays single-sourced)."""
-    from tools.memory_tool import MemoryStore
-
-    MemoryStore._write_file(path, [c.strip() for c in chunks if c.strip()])
 
 
 def _clear_skill_cache() -> None:
