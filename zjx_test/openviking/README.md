@@ -84,3 +84,40 @@ python zjx_test/openviking/smoke_provider.py --keep
 
 The script prints the exact `viking://` URI. Delete retained test data after
 inspection with Hermes' `viking_forget` tool or OpenViking's filesystem API.
+
+## Multi-session Agent lifecycle experiment
+
+`smoke_agent_lifecycle.py` exercises the MemoryManager integration used by
+Hermes rather than calling `viking_remember` directly. It runs two completed
+turns in Session A, uses Hermes' in-process `/new` lifecycle to commit and
+switch to Session B, recalls the extracted facts, adds and commits a third
+fact, then starts a fresh Manager for Session C and verifies all three facts
+plus Hermes' actual `<memory-context>` injection format.
+
+```bash
+python zjx_test/openviking/smoke_agent_lifecycle.py
+```
+
+The server must report both `Embedding: PASS` and `VLM: PASS` first:
+
+```bash
+openviking-server doctor
+```
+
+VLM extraction is asynchronous. The default wait is four minutes per recall
+boundary; it can be increased for a slow model endpoint:
+
+```bash
+python zjx_test/openviking/smoke_agent_lifecycle.py \
+  --extraction-timeout 600 \
+  --poll-interval 10
+```
+
+Every run uses unique `OPENVIKING_USER` and `OPENVIKING_AGENT` identities. The
+script attempts to recursively delete only those unique namespaces and exact
+test sessions at the end. Use `--keep` to retain them for inspection.
+
+Assistant messages in this experiment are deterministic strings. The real
+Hermes MemoryManager, background synchronization, OpenViking server, VLM
+extraction, embedding, retrieval, and API-bound memory-context composition are
+used; no chat model is called to decide or generate the assistant response.
