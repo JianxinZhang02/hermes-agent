@@ -94,6 +94,11 @@ switch to Session B, recalls the extracted facts, adds and commits a third
 fact, then starts a fresh Manager for Session C and verifies all three facts
 plus Hermes' actual `<memory-context>` injection format.
 
+The conversation uses meaningful project decisions rather than opaque test
+labels: a unique project name, MySQL 8.4 with `utf8mb4`, production port 3306,
+and a daily backup policy. Assertions check durable business values (`MySQL`,
+`utf8mb4`, and `3306`) that a summarizing VLM should preserve.
+
 ```bash
 python zjx_test/openviking/smoke_agent_lifecycle.py
 ```

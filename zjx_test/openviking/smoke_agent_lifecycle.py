@@ -164,18 +164,26 @@ def _wait_for_recall(
     started = time.monotonic()
     deadline = started + timeout
     last_context = ""
+    attempt = 0
 
     while True:
+        attempt += 1
         contexts = [
             manager.prefetch_all(query, session_id=session_id)
             for query in queries
         ]
         last_context = "\n\n".join(context for context in contexts if context)
-        if _contains_all(last_context, markers):
-            return last_context, time.monotonic() - started
+        elapsed = time.monotonic() - started
+        found = [marker for marker in markers if marker.casefold() in last_context.casefold()]
+        missing = [marker for marker in markers if marker not in found]
+        print(
+            f"      recall attempt {attempt}: elapsed={elapsed:.1f}s "
+            f"found={found!r} missing={missing!r}",
+            flush=True,
+        )
+        if not missing:
+            return last_context, elapsed
         if time.monotonic() >= deadline:
-            found = [marker for marker in markers if marker.casefold() in last_context.casefold()]
-            missing = [marker for marker in markers if marker not in found]
             preview = last_context[:2000] if last_context else "<empty>"
             raise ScenarioFailure(
                 "VLM extraction/recall did not expose every marker within "
@@ -297,9 +305,10 @@ def run(args: argparse.Namespace) -> None:
     user_id = f"zjx-smoke-user-{run_token}"
     agent_id = f"hermes-smoke-agent-{run_token}"
     session_ids = [f"hermes-smoke-{label}-{run_token}" for label in ("a", "b", "c")]
-    project_code = f"Aurora-Pine-{run_token}"
-    preference_code = f"Cobalt-Reply-{run_token}"
-    region_code = f"Nebula-Zone-{run_token}"
+    project_name = f"Northstar-Commerce-{run_token}"
+    database_engine = "MySQL"
+    database_charset = "utf8mb4"
+    database_port = "3306"
 
     old_env = {
         key: os.environ.get(key)
@@ -337,10 +346,10 @@ def run(args: argparse.Namespace) -> None:
                 turn_number=1,
                 session_id=session_ids[0],
                 user_text=(
-                    f"请在后续会话中记住：我的项目代号是 {project_code}。"
-                    "这是长期有效的项目事实。"
+                    f"请在后续会话中记住：当前项目名称是 {project_name}。"
+                    "这是长期有效的项目名称。"
                 ),
-                assistant_text=f"好的，我会记住项目代号 {project_code}。",
+                assistant_text=f"好的，我会记住当前项目名称是 {project_name}。",
                 transcript=transcript_a,
             )
             _complete_turn(
@@ -348,11 +357,13 @@ def run(args: argparse.Namespace) -> None:
                 turn_number=2,
                 session_id=session_ids[0],
                 user_text=(
-                    f"我的长期回复偏好标识是 {preference_code}，"
-                    "回答时优先使用中文并给出可验证步骤。"
+                    f"{project_name} 的数据库架构已经确定：使用 "
+                    f"{database_engine} 8.4，默认字符集为 {database_charset}，"
+                    "不使用 PostgreSQL。后续数据库设计都以此为准。"
                 ),
                 assistant_text=(
-                    f"明白，我会记住偏好 {preference_code}，优先使用中文和可验证步骤。"
+                    f"明白，我会记住 {project_name} 使用 {database_engine} 8.4，"
+                    f"默认字符集是 {database_charset}。"
                 ),
                 transcript=transcript_a,
             )
@@ -366,36 +377,53 @@ def run(args: argparse.Namespace) -> None:
             )
 
             _step(4, 8, "Open Session B and recall both Session A facts")
-            query_b = "请告诉我之前的项目代号和长期回复偏好。"
+            query_b = "请告诉我之前确定的项目名称和数据库技术选型。"
             recalled_b, elapsed_b = _wait_for_recall(
                 manager_ab,
                 session_id=session_ids[1],
                 queries=[
-                    f"之前记住的项目代号 {project_code} 是什么？",
-                    f"长期回复偏好 {preference_code} 是什么？",
+                    "之前确定的项目名称是什么？",
+                    "这个项目确定使用哪种数据库和默认字符集？",
                 ],
-                markers=[project_code, preference_code],
+                markers=[project_name, database_engine, database_charset],
                 timeout=args.extraction_timeout,
                 interval=args.poll_interval,
             )
             api_content_b = _verify_api_injection(
                 query_b,
                 recalled_b,
-                [project_code, preference_code],
+                [project_name, database_engine, database_charset],
             )
             print(f"      recalled and injected after {elapsed_b:.2f}s")
             print(f"      API content contains {len(api_content_b)} characters")
 
-            _step(5, 8, "Complete a third turn in Session B and commit it")
+            _step(5, 8, "Complete two database-operation turns in Session B and commit")
             transcript_b: list[dict[str, Any]] = []
             _complete_turn(
                 manager_ab,
                 turn_number=1,
                 session_id=session_ids[1],
                 user_text=(
-                    f"请继续记住：项目的长期部署区域标识是 {region_code}。"
+                    f"请继续记住：{project_name} 的生产环境 {database_engine} "
+                    f"服务固定使用端口 {database_port}，数据库连接配置都按这个端口编写。"
                 ),
-                assistant_text=f"好的，我会记住部署区域标识 {region_code}。",
+                assistant_text=(
+                    f"好的，我会记住 {project_name} 的生产 {database_engine} "
+                    f"端口是 {database_port}。"
+                ),
+                transcript=transcript_b,
+            )
+            _complete_turn(
+                manager_ab,
+                turn_number=2,
+                session_id=session_ids[1],
+                user_text=(
+                    f"另外，{project_name} 的生产数据库每天 UTC 02:00 自动备份，"
+                    "备份保留 14 天。请把它作为长期运维约定。"
+                ),
+                assistant_text=(
+                    "明白，生产数据库每天 UTC 02:00 自动备份，并保留 14 天。"
+                ),
                 transcript=transcript_b,
             )
             _commit_and_close(manager_ab, transcript_b, sync_timeout=args.sync_timeout)
@@ -409,16 +437,16 @@ def run(args: argparse.Namespace) -> None:
                 agent_id=agent_id,
             )
             active_managers.append(manager_c)
-            query_c = "汇总我之前提供的项目代号、回复偏好和部署区域。"
+            query_c = "汇总之前确定的项目名称、数据库技术和生产数据库端口。"
             recalled_c, elapsed_c = _wait_for_recall(
                 manager_c,
                 session_id=session_ids[2],
                 queries=[
-                    f"项目代号 {project_code}",
-                    f"回复偏好 {preference_code}",
-                    f"部署区域 {region_code}",
+                    "之前确定的项目名称是什么？",
+                    "项目使用的数据库技术是什么？",
+                    "生产环境数据库连接端口是多少？",
                 ],
-                markers=[project_code, preference_code, region_code],
+                markers=[project_name, database_engine, database_port],
                 timeout=args.extraction_timeout,
                 interval=args.poll_interval,
             )
@@ -427,12 +455,12 @@ def run(args: argparse.Namespace) -> None:
             api_content_c = _verify_api_injection(
                 query_c,
                 recalled_c,
-                [project_code, preference_code, region_code],
+                [project_name, database_engine, database_port],
             )
             print(f"      all three markers recalled after {elapsed_c:.2f}s")
             print("      <memory-context> fencing verified")
             print("      injected marker summary:")
-            for marker in (project_code, preference_code, region_code):
+            for marker in (project_name, database_engine, database_port):
                 print(f"        - {marker}")
             if len(api_content_c) < len(query_c):
                 raise ScenarioFailure("injected API content was unexpectedly truncated")
