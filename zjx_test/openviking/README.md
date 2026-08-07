@@ -24,6 +24,11 @@ the session commit/extraction path because that path can generate multiple
 derived memories that cannot be deterministically identified and cleaned up by
 a smoke test.
 
+OpenViking may return a canonical URI containing the trusted-mode user, for
+example `viking://user/default/peers/...`, even when Hermes submitted
+`viking://user/peers/...`. The smoke test treats these as the same record when
+their complete peer-relative path matches and prints the canonical URI.
+
 ## Server setup
 
 In terminal A:

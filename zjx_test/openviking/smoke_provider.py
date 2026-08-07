@@ -55,7 +55,28 @@ def _print_step(number: int, message: str) -> None:
     print(f"[{number}/6] {message}", flush=True)
 
 
-def _find_uri(provider: "OpenVikingMemoryProvider", query: str, uri: str) -> bool:
+def _same_memory_uri(expected: str, actual: str) -> bool:
+    """Match submitted and server-canonicalized OpenViking user URIs.
+
+    In trusted/default-user mode OpenViking may canonicalize
+    ``viking://user/peers/...`` to ``viking://user/default/peers/...`` in
+    search results. The content and delete endpoints accept the submitted
+    alias, so compare the stable peer-relative suffix as well as the exact URI.
+    """
+    if actual == expected:
+        return True
+    prefix = "viking://user/"
+    if not expected.startswith(prefix) or not actual.startswith(prefix):
+        return False
+    expected_suffix = expected[len(prefix) :]
+    return actual.endswith("/" + expected_suffix)
+
+
+def _find_uri(
+    provider: "OpenVikingMemoryProvider",
+    query: str,
+    uri: str,
+) -> tuple[str | None, list[str]]:
     payload = _parse_json(
         provider.handle_tool_call(
             "viking_search",
@@ -69,10 +90,16 @@ def _find_uri(provider: "OpenVikingMemoryProvider", query: str, uri: str) -> boo
         "viking_search",
     )
     results = payload.get("results", [])
-    return any(
-        isinstance(item, dict) and str(item.get("uri") or "") == uri
-        for item in results
-    )
+    candidate_uris: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        candidate_uri = str(item.get("uri") or "")
+        if candidate_uri:
+            candidate_uris.append(candidate_uri)
+        if _same_memory_uri(uri, candidate_uri):
+            return candidate_uri, candidate_uris
+    return None, candidate_uris
 
 
 def _wait_until_searchable(
@@ -82,21 +109,27 @@ def _wait_until_searchable(
     uri: str,
     timeout: float,
     interval: float,
-) -> float:
+) -> tuple[float, str]:
     started = time.monotonic()
     deadline = started + timeout
     last_error: Exception | None = None
+    last_candidates: list[str] = []
 
     while True:
         try:
-            if _find_uri(provider, query, uri):
-                return time.monotonic() - started
+            matched_uri, last_candidates = _find_uri(provider, query, uri)
+            if matched_uri:
+                return time.monotonic() - started, matched_uri
             last_error = None
         except Exception as exc:  # the index may be temporarily unavailable
             last_error = exc
 
         if time.monotonic() >= deadline:
             detail = f" Last search error: {last_error}" if last_error else ""
+            if last_candidates:
+                detail += " Last candidate URIs: " + ", ".join(last_candidates[:5])
+            else:
+                detail += " Search returned no candidate URIs."
             raise SmokeFailure(
                 f"memory did not appear in OpenViking search within {timeout:.1f}s."
                 f"{detail} The write/read path succeeded, but vector indexing or "
@@ -218,7 +251,7 @@ def run(args: argparse.Namespace) -> None:
                 _print_step(4, "Skip vector-search verification (--skip-search)")
             else:
                 _print_step(4, "Wait for vector indexing and find the exact URI")
-                elapsed = _wait_until_searchable(
+                elapsed, matched_uri = _wait_until_searchable(
                     provider,
                     query=marker,
                     uri=test_uri,
@@ -226,6 +259,8 @@ def run(args: argparse.Namespace) -> None:
                     interval=args.poll_interval,
                 )
                 print(f"      searchable after {elapsed:.2f}s")
+                if matched_uri != test_uri:
+                    print(f"      canonical URI: {matched_uri}")
 
             if args.keep:
                 _print_step(5, "Keep the temporary memory (--keep)")
