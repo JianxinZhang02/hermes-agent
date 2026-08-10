@@ -142,9 +142,13 @@ def _command_in_current_environment(name: str) -> Path:
     resolved = shutil.which(name)
     if not resolved:
         raise HarnessError(f"Required command is not available in PATH: {name}")
-    command = Path(resolved).resolve()
-    python_dir = Path(sys.executable).resolve().parent
-    if command.parent != python_dir:
+    # Do not resolve the executables themselves here.  In a normal POSIX venv,
+    # ``bin/python`` is commonly a symlink to ``/usr/bin/pythonX.Y`` while
+    # console scripts such as ``bin/hermes`` are regular files.  Resolving only
+    # the Python symlink makes two commands from the same venv look unrelated.
+    command = Path(os.path.abspath(resolved))
+    active_python = Path(os.path.abspath(sys.executable))
+    if os.path.normcase(str(command.parent)) != os.path.normcase(str(active_python.parent)):
         raise HarnessError(
             f"{name} resolves outside the active Python environment:\n"
             f"  python:  {sys.executable}\n  {name}: {command}"
@@ -165,7 +169,7 @@ def validate_editable_hermes(repo_root: Path = REPO_ROOT) -> dict[str, str]:
             )
         origins[module_name] = str(origin)
     hermes = _command_in_current_environment("hermes")
-    origins["python"] = str(Path(sys.executable).resolve())
+    origins["python"] = str(Path(os.path.abspath(sys.executable)))
     origins["hermes"] = str(hermes)
     return origins
 

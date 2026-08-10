@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import benchmark_harness
 from benchmark_harness import (
     HarnessError,
     assert_config_parity,
@@ -41,6 +42,23 @@ def test_vendor_integrity_contract_detects_tampering(tmp_path: Path) -> None:
     artifact.write_bytes(b"modified bytes\n")
     with pytest.raises(HarnessError, match="changed"):
         verify_vendor_files(vendor, manifest)
+
+
+def test_console_script_check_uses_venv_path_without_resolving_python_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "hermes_env" / "bin"
+    bin_dir.mkdir(parents=True)
+    python_path = bin_dir / "python"
+    hermes_path = bin_dir / "hermes"
+    monkeypatch.setattr(benchmark_harness.sys, "executable", str(python_path))
+    monkeypatch.setattr(
+        benchmark_harness.shutil,
+        "which",
+        lambda name: str(hermes_path) if name == "hermes" else None,
+    )
+
+    assert benchmark_harness._command_in_current_environment("hermes") == hermes_path
 
 
 def test_dataset_contract_checks_size_and_sha(tmp_path: Path) -> None:
