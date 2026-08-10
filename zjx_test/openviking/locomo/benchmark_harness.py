@@ -146,6 +146,11 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
+def current_python_command() -> Path:
+    """Return the active environment's Python path without resolving venv symlinks."""
+    return Path(os.path.abspath(sys.executable))
+
+
 def _command_in_current_environment(name: str) -> Path:
     resolved = shutil.which(name)
     if not resolved:
@@ -155,7 +160,7 @@ def _command_in_current_environment(name: str) -> Path:
     # console scripts such as ``bin/hermes`` are regular files.  Resolving only
     # the Python symlink makes two commands from the same venv look unrelated.
     command = Path(os.path.abspath(resolved))
-    active_python = Path(os.path.abspath(sys.executable))
+    active_python = current_python_command()
     if os.path.normcase(str(command.parent)) != os.path.normcase(str(active_python.parent)):
         raise HarnessError(
             f"{name} resolves outside the active Python environment:\n"

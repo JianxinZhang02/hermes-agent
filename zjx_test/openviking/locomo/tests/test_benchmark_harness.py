@@ -4,11 +4,13 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 import benchmark_harness
+import run_benchmark
 from benchmark_harness import (
     HarnessError,
     assert_config_parity,
@@ -115,6 +117,48 @@ def test_console_script_check_uses_venv_path_without_resolving_python_symlink(
     )
 
     assert benchmark_harness._command_in_current_environment("hermes") == hermes_path
+
+
+def test_official_suite_uses_active_venv_python_without_resolving_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv_python = tmp_path / "hermes_env" / "bin" / "python"
+    monkeypatch.setattr(run_benchmark, "current_python_command", lambda: venv_python)
+    paths = SimpleNamespace(
+        openviking_config=tmp_path / "ov.conf",
+        openviking_workspace=tmp_path / "openviking-workspace",
+    )
+    args = SimpleNamespace(
+        dataset=tmp_path / "locomo10.json",
+        gateway_port=8642,
+        openviking_port=1934,
+        import_parallel=4,
+        qa_parallel=4,
+        judge_parallel=5,
+        import_error_retries=2,
+        qa_error_retries=2,
+        judge_error_retries=2,
+        queue_max_wait_sec=1800,
+    )
+    context = {
+        "base_env": {},
+        "paths": paths,
+        "judge_url": "https://judge.example/v1",
+        "judge_token": "secret",
+        "judge_model": "judge-model",
+        "run_id": "test-run",
+    }
+
+    env = run_benchmark._suite_env(
+        args,
+        context,
+        suite="native",
+        home=tmp_path / "hermes-home",
+        result_dir=tmp_path / "results",
+        api_key="locomo-test-key",
+    )
+
+    assert env["PYTHON"] == str(venv_python)
 
 
 def test_dataset_contract_checks_size_and_sha(tmp_path: Path) -> None:

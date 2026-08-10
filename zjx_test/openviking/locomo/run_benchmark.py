@@ -26,6 +26,7 @@ from benchmark_harness import (
     child_environment,
     compare_results,
     create_openviking_config,
+    current_python_command,
     default_run_id,
     git_revision,
     immutable_run_parameters,
@@ -274,7 +275,10 @@ def _suite_env(
     )
     env.update(
         {
-            "PYTHON": str(Path(sys.executable).resolve()),
+            # Preserve the venv entry-point path. Resolving it follows
+            # ``hermes_env/bin/python`` to the system interpreter, which does
+            # not contain the editable Hermes benchmark dependencies.
+            "PYTHON": str(current_python_command()),
             "LOCOMO_JSON": str(args.dataset.expanduser().resolve()),
             "HERMES_URL": gateway_url,
             "HERMES_TOKEN": api_key,
