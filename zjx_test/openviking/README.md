@@ -1,5 +1,8 @@
 # OpenViking live provider experiment
 
+For the pinned Hermes Native vs Hermes+OpenViking LoCoMo reproduction, see
+[`locomo/README.md`](locomo/README.md).
+
 This directory contains an opt-in smoke test for the real Hermes OpenViking
 provider. It is not part of the default pytest suite and does not copy or
 simulate the provider implementation.
