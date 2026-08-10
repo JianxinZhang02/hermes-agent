@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "外部记忆提供者插件 — Honcho、OpenViking、Mem0、Hindsight、Holographic、RetainDB、ByteRover、Supermemory"
+description: "外部记忆提供者插件 — Honcho、OpenViking、Mem0、Hindsight、Holographic、RetainDB、ByteRover、Supermemory、TencentDB Agent Memory"
 ---
 
 # Memory Providers
 
-Hermes Agent 内置 8 个外部记忆提供者插件，为 Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。同一时间只能激活**一个**外部提供者——内置记忆始终与其并行工作。
+Hermes Agent 内置 9 个外部记忆提供者插件，为 Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。同一时间只能激活**一个**外部提供者——内置记忆始终与其并行工作。
 
 ## 快速开始
 
@@ -22,7 +22,7 @@ hermes memory off        # 禁用外部提供者
 
 ```yaml
 memory:
-  provider: openviking   # 或 honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # 或 honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory, memory_tencentdb
 ```
 
 ## 工作原理
@@ -543,6 +543,82 @@ Base URL 优先级为 `supermemory.json` → `SUPERMEMORY_BASE_URL` → `https:/
 
 ---
 
+### TencentDB Agent Memory
+
+通过官方 [TencentDB Agent Memory](https://github.com/Tencent/TencentDB-Agent-Memory)
+Gateway 提供四层自托管记忆。Hermes 只承担生命周期和作用域适配；记忆提取、
+检索、调度和存储由 Gateway 负责。
+
+| | |
+|---|---|
+| **适合场景** | 需要明确租户、Agent、用户及会话隔离的 local-first 结构化记忆 |
+| **依赖** | 官方 Node.js Gateway（Node.js 22.16 或更高版本） |
+| **数据存储** | 默认本地 SQLite/sqlite-vec，可选 Tencent VectorDB |
+| **费用** | 自托管免费；模型与可选云数据库费用另计 |
+
+TencentDB Agent Memory 将记忆分为四个原生层级：
+
+- **L0**：Hermes 每轮完成后写入的原始对话证据
+- **L1**：Gateway 异步提取的原子/情景记忆
+- **L2**：场景 Markdown 文件
+- **L3**：合成后的用户核心信息/persona
+
+**工具：** `memory_tencentdb_memory_search`（L1 搜索）、
+`memory_tencentdb_conversation_search`（L0 搜索）、
+`memory_tencentdb_remember`（显式提交持久化 L0）、
+`memory_tencentdb_update` 和 `memory_tencentdb_forget`（按精确 ID 修改 L1）、
+`memory_tencentdb_read_scene`（读取 L2）以及 `memory_tencentdb_profile`（读取 L3）。
+
+先单独准备官方 Gateway：
+
+```bash
+git clone https://github.com/Tencent/TencentDB-Agent-Memory.git
+cd TencentDB-Agent-Memory/MemoryCore
+pnpm install
+pnpm exec tsx src/gateway/server.ts
+```
+
+再激活 Hermes 适配器：
+
+```bash
+hermes config set memory.provider memory_tencentdb
+hermes memory setup
+```
+
+非敏感配置按 profile 保存到 `$HERMES_HOME/memory_tencentdb.json`。连接已经由外部
+启动的 Gateway 时，最小配置为：
+
+```json
+{
+  "endpoint": "http://127.0.0.1:8420",
+  "auto_start": false,
+  "service_id": "default"
+}
+```
+
+可选的 Gateway Bearer token 应写入 `$HERMES_HOME/.env`，环境变量名为
+`MEMORY_TENCENTDB_GATEWAY_API_KEY`。由 Hermes 托管本地 Gateway 时，可通过
+`TDAI_LLM_API_KEY` 提供模型密钥。配置 `gateway_cmd` 后 Hermes 可以监管 sidecar；
+如果 Gateway 由外部启动，Hermes 不会将其关闭。
+
+作用域映射为：`workspace → team_id`、当前 profile → `agent_id`、平台用户 →
+`user_id`、当前对话 → `session_id`、存在时的 Provider task scope → `task_id`。
+L1 召回有意不限定 session，因此新会话可以召回同一 team/agent/user/task 边界内的
+历史持久记忆。
+
+原生各层作用域并不相同：L0 保留 Session/Task，L1 在 team/agent/user/task 内跨 Session
+聚合；上游 L2/L3 则有意按 team/agent 聚合并跨用户共享。如果 L2/L3 也必须在
+用户间隔离，应为不同用户配置不同的 `team_id`。
+
+Hermes 会话结束时，Adapter 会先排空 L0 写入，再调用 Gateway 的
+`POST /session/end` 对该 Session 做定向 flush，完成后才绑定新 Session；不会重启
+Gateway，也不会干扰其他并发 Session。
+
+完整配置、生命周期、离线 smoke 与上游边界参见
+[Provider README](https://github.com/NousResearch/hermes-agent/tree/main/plugins/memory/memory_tencentdb)。
+
+---
+
 ## 提供者对比
 
 | 提供者 | 存储 | 费用 | 工具数 | 依赖 | 独特特性 |
@@ -555,15 +631,17 @@ Base URL 优先级为 `supermemory.json` → `SUPERMEMORY_BASE_URL` → `https:/
 | **RetainDB** | 云端 | $20/月 | 5 | `requests` | 增量压缩 |
 | **ByteRover** | 本地/云端 | 免费/付费 | 3 | `brv` CLI | 预压缩提取 |
 | **Supermemory** | 云端/自托管 | 免费/付费 | 4 | `supermemory` | 上下文隔离 + 会话图谱导入 + 多容器 |
+| **TencentDB Agent Memory** | 自托管/云后端 | 免费/按量 | 7 | Node.js Gateway | 原生 L0–L3 流水线 + 严格租户隔离 |
 
 ## Profile 隔离
 
 每个提供者的数据按 [profile](/user-guide/profiles) 隔离：
 
 - **本地存储提供者**（Holographic、ByteRover）使用 `$HERMES_HOME/` 路径，各 profile 路径不同
-- **配置文件提供者**（Honcho、Mem0、Hindsight、Supermemory）将配置存储在 `$HERMES_HOME/` 中，每个 profile 拥有独立凭证
+- **配置文件提供者**（Honcho、Mem0、Hindsight、Supermemory、TencentDB Agent Memory）将非敏感配置存储在 `$HERMES_HOME/` 中，每个 profile 拥有独立设置
 - **云端提供者**（RetainDB）自动派生 profile 范围的项目名称
 - **环境变量提供者**（OpenViking）通过每个 profile 的 `.env` 文件配置
+- **租户作用域提供者**（TencentDB Agent Memory）还会在每次 Gateway 操作中发送 workspace、profile、user 与 session 标识
 
 ## 构建记忆提供者
 

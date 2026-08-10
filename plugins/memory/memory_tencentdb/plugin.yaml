@@ -1,0 +1,8 @@
+name: memory_tencentdb
+display_name: TencentDB Agent Memory
+version: 1.0.0
+description: "TencentDB Agent Memory — local-first L0 conversation evidence, L1 atomic memories, L2 scenarios, and L3 persona through the official Gateway."
+hooks:
+  - on_memory_write
+  - on_session_end
+  - on_session_switch

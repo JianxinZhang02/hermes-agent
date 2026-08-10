@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory, TencentDB Agent Memory"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 9 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory, memory_tencentdb
 ```
 
 ## How It Works
@@ -631,6 +631,88 @@ Base URL precedence is `supermemory.json` → `SUPERMEMORY_BASE_URL` → `https:
 
 **Support:** [Discord](https://supermemory.link/discord) · [support@supermemory.com](mailto:support@supermemory.com)
 
+---
+
+### TencentDB Agent Memory
+
+Four-layer, self-hosted memory through the official
+[TencentDB Agent Memory](https://github.com/Tencent/TencentDB-Agent-Memory)
+Gateway. Hermes is the lifecycle adapter; the Gateway owns extraction,
+retrieval, scheduling, and storage.
+
+| | |
+|---|---|
+| **Best for** | Local-first structured memory with explicit tenant and session isolation |
+| **Requires** | The official Node.js Gateway (Node.js 22.16 or newer) |
+| **Data storage** | Local SQLite/sqlite-vec by default, optional Tencent VectorDB |
+| **Cost** | Free/self-hosted; model and optional cloud database costs are separate |
+
+TencentDB Agent Memory separates its artifacts into four native layers:
+
+- **L0** conversation evidence written after completed Hermes turns
+- **L1** atomic/episodic memories extracted asynchronously by the Gateway
+- **L2** scenario Markdown files
+- **L3** synthesized user core/persona
+
+**Tools:** `memory_tencentdb_memory_search` (L1 search),
+`memory_tencentdb_conversation_search` (L0 search),
+`memory_tencentdb_remember` (durable L0 submission),
+`memory_tencentdb_update` and `memory_tencentdb_forget` (exact L1 mutation),
+`memory_tencentdb_read_scene` (L2), and `memory_tencentdb_profile` (L3).
+
+Prepare the official Gateway separately:
+
+```bash
+git clone https://github.com/Tencent/TencentDB-Agent-Memory.git
+cd TencentDB-Agent-Memory/MemoryCore
+pnpm install
+pnpm exec tsx src/gateway/server.ts
+```
+
+Then activate the Hermes adapter:
+
+```bash
+hermes config set memory.provider memory_tencentdb
+hermes memory setup
+```
+
+Non-secret settings are profile-scoped in
+`$HERMES_HOME/memory_tencentdb.json`. A minimal configuration for an
+externally managed Gateway is:
+
+```json
+{
+  "endpoint": "http://127.0.0.1:8420",
+  "auto_start": false,
+  "service_id": "default"
+}
+```
+
+The optional Gateway Bearer token belongs in `$HERMES_HOME/.env` as
+`MEMORY_TENCENTDB_GATEWAY_API_KEY`. When Hermes supervises a local Gateway,
+its LLM secret can be supplied as `TDAI_LLM_API_KEY`. A configured
+`gateway_cmd` enables sidecar supervision; an externally started Gateway is
+never stopped by Hermes.
+
+Hermes maps `workspace → team_id`, active profile → `agent_id`, platform user
+→ `user_id`, the current conversation → `session_id`, and an available provider
+task scope → `task_id`. L1 recall omits the
+session filter intentionally, allowing a new session to recall durable memory
+from earlier sessions while keeping the team/agent/user/task boundary.
+
+Scope differs by native layer: L0 keeps session/task scope, L1 aggregates across
+sessions within team/agent/user/task, and upstream L2/L3 intentionally aggregate at
+team/agent level across users. Use distinct `team_id` values when L2/L3 must
+not be shared between users.
+
+On a Hermes session boundary, the adapter drains L0 writes and calls the
+Gateway's scoped `POST /session/end` flush before rebinding to the next session.
+It does not restart the Gateway or disturb concurrent sessions.
+
+See the [provider README](https://github.com/NousResearch/hermes-agent/tree/main/plugins/memory/memory_tencentdb)
+for every config field, lifecycle behavior, offline smoke test, and the exact
+upstream boundary.
+
 ### Memori
 
 Structured long-term memory using Memori Cloud, with background completed-turn capture, tool-aware turn context, and explicit recall tools for facts, summaries, quota, signup, and feedback.
@@ -666,6 +748,7 @@ hermes memory setup
 | **RetainDB** | Cloud | $20/mo | 10 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud/Self-hosted | Free/Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
+| **TencentDB Agent Memory** | Self-hosted/Cloud backend | Free/Usage-based | 7 | Node.js Gateway | Native L0–L3 pipeline + strict tenant isolation |
 | **Memori** | Cloud | Free/Paid | 5 | `hermes-memori` | Tool-aware memory + structured recall |
 
 ## Profile Isolation
@@ -673,9 +756,10 @@ hermes memory setup
 Each provider's data is isolated per [profile](/user-guide/profiles):
 
 - **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
-- **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
+- **Config file providers** (Honcho, Mem0, Hindsight, Supermemory, TencentDB Agent Memory) store non-secret config in `$HERMES_HOME/` so each profile has its own settings
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
+- **Tenant-scoped providers** (TencentDB Agent Memory) also send workspace, profile, user, and session identifiers on every Gateway operation
 
 ## Building a Memory Provider
 
