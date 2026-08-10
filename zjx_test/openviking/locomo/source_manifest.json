@@ -1,18 +1,37 @@
 {
-  "openviking": {
-    "repository": "https://github.com/volcengine/OpenViking",
-    "tag": "v0.3.22",
-    "commit": "18897e46d272de4653352666d877348ee95f2dcd",
-    "source_path": "benchmark/locomo/hermes",
-    "license": "Apache-2.0",
-    "files": {
-      "import_to_native.py": "2c084e76630c2fbca1da98b3676c594a3680920cbdf94ae1450485dd1de868cd",
-      "import_e2e.py": "3d35edec7d772d71832945f2aab46ae8ae754efda3ab6e4474f25ec786802ce0",
-      "eval.py": "2383807759bceaf78bbd2dedd54b74f77a9128052cc91ef01bef6fba621259ff",
-      "judge.py": "aedce07d62fd3583fc3f6e42a499b53167a39f497ac4e245045a6dc86073ed5d",
-      "stat_judge_result.py": "1ebd13dbb0a87b8f31b6e91ba5cb34d10621382ba2013818bedc33d991080bbb",
-      "run_full_eval.sh": "36179673b61201ac6e19735b8ba52854c49b79c35d5e01a0ba229456b667d7cd",
-      "OPENVIKING_LICENSE": "1bd87fa6d9a5c79daf0c2af042b6725c9773bf095cc3d1bdf3656e66d1c3e5b1"
+  "openviking_benchmarks": {
+    "0.3.22": {
+      "repository": "https://github.com/volcengine/OpenViking",
+      "tag": "v0.3.22",
+      "commit": "18897e46d272de4653352666d877348ee95f2dcd",
+      "source_path": "benchmark/locomo/hermes",
+      "license": "AGPL-3.0",
+      "files": {
+        "import_to_native.py": "2c084e76630c2fbca1da98b3676c594a3680920cbdf94ae1450485dd1de868cd",
+        "import_e2e.py": "3d35edec7d772d71832945f2aab46ae8ae754efda3ab6e4474f25ec786802ce0",
+        "eval.py": "2383807759bceaf78bbd2dedd54b74f77a9128052cc91ef01bef6fba621259ff",
+        "judge.py": "aedce07d62fd3583fc3f6e42a499b53167a39f497ac4e245045a6dc86073ed5d",
+        "stat_judge_result.py": "1ebd13dbb0a87b8f31b6e91ba5cb34d10621382ba2013818bedc33d991080bbb",
+        "run_full_eval.sh": "36179673b61201ac6e19735b8ba52854c49b79c35d5e01a0ba229456b667d7cd",
+        "OPENVIKING_LICENSE": "1bd87fa6d9a5c79daf0c2af042b6725c9773bf095cc3d1bdf3656e66d1c3e5b1"
+      }
+    },
+    "0.4.12": {
+      "repository": "https://github.com/volcengine/OpenViking",
+      "tag": "v0.4.12",
+      "commit": "c1d38eb47ff2ebf9ff4cee46756728893fd8caf3",
+      "source_path": "benchmark/locomo/hermes",
+      "license": "AGPL-3.0",
+      "compatibility_note": "LoCoMo data processing and judging are unchanged from v0.3.22; the Hermes E2E scripts remove the obsolete X-OpenViking-Agent header.",
+      "files": {
+        "import_to_native.py": "2c084e76630c2fbca1da98b3676c594a3680920cbdf94ae1450485dd1de868cd",
+        "import_e2e.py": "8930ea9cd73981054b274d543f7af7ec22905c3f2626a8326fd3d671113678b8",
+        "eval.py": "78aa255ec5247350f19a397237a19173fbcfbba7c99467c845820201405e226e",
+        "judge.py": "aedce07d62fd3583fc3f6e42a499b53167a39f497ac4e245045a6dc86073ed5d",
+        "stat_judge_result.py": "1ebd13dbb0a87b8f31b6e91ba5cb34d10621382ba2013818bedc33d991080bbb",
+        "run_full_eval.sh": "7729294113a95beb220b4243c941e9cbeb5c1df0d86dc6a6424f244d88865dc7",
+        "OPENVIKING_LICENSE": "1bd87fa6d9a5c79daf0c2af042b6725c9773bf095cc3d1bdf3656e66d1c3e5b1"
+      }
     }
   },
   "locomo": {

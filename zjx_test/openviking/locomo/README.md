@@ -1,8 +1,10 @@
 # Hermes Native vs OpenViking LoCoMo reproduction
 
-This directory reproduces the official OpenViking `v0.3.22` Hermes LoCoMo
-protocol while keeping all experiment code outside the Hermes core. The two
-arms are:
+This directory reproduces the official OpenViking Hermes LoCoMo protocol while
+keeping all experiment code outside the Hermes core. It contains pinned
+official benchmark scripts for OpenViking `v0.3.22` and `v0.4.12`, and
+automatically selects the scripts matching the installed server package. The
+two arms are:
 
 - `native`: Hermes with `memory.provider: ""`;
 - `e2e`: the same Hermes configuration with `memory.provider: openviking`.
@@ -14,17 +16,20 @@ from the published report, but both arms always use the same selected model.
 ## What is pinned
 
 - The six benchmark scripts are copied without algorithm changes from
-  `volcengine/OpenViking` tag `v0.3.22`, commit
-  `18897e46d272de4653352666d877348ee95f2dcd`.
+  `volcengine/OpenViking` tags `v0.3.22` and `v0.4.12`. The matching set is
+  selected from the installed `openviking` package version.
 - `source_manifest.json` stores a SHA256 for every vendored file. Every run
   verifies these hashes before starting.
+- Between these two official versions, LoCoMo processing, answer judging, and
+  statistics are unchanged. The `v0.4.12` E2E scripts remove the obsolete
+  `X-OpenViking-Agent` header.
 - LoCoMo `locomo10.json` is downloaded from commit
   `3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376` and verified as
   `79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`.
 - Category 5 is excluded and categories 1–4 are judged by the unmodified
   official judge code at temperature 0.
 
-See `ATTRIBUTION.md` for the Apache-2.0 and CC BY-NC 4.0 notices.
+See `ATTRIBUTION.md` for the AGPL-3.0 and CC BY-NC 4.0 notices.
 
 ## Server preparation
 
@@ -38,9 +43,14 @@ cd hermes-agent
 # Only needed once. Editable mode means later source updates are used directly.
 pip install -e ".[dev]"
 
-# Strict mode checks this exact OpenViking package version.
+# The runner selects matching official scripts for 0.3.22 or 0.4.12.
 python -c "import importlib.metadata as m; print(m.version('openviking'))"
 ```
+
+OpenViking `0.4.12` is a supported strict-reproduction version and needs no
+extra flag. A future or otherwise unpinned version is rejected by default. The
+`--allow-openviking-version-mismatch` flag deliberately falls back to the
+`v0.3.22` script protocol and marks that run as a non-strict compatibility run.
 
 The experiment uses the model already selected in the base Hermes config,
 normally `/root/.hermes/config.yaml`. Configure the desired Hermes answer model

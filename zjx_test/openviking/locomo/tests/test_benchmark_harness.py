@@ -21,6 +21,7 @@ from benchmark_harness import (
     materialize_hermes_homes,
     redact,
     safe_model_config,
+    validate_openviking_install,
     verify_vendor_files,
 )
 from prepare_dataset import DatasetError, verify_dataset
@@ -34,7 +35,13 @@ def test_vendor_integrity_contract_detects_tampering(tmp_path: Path) -> None:
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
-        json.dumps({"openviking": {"files": {"artifact.bin": digest}}}),
+        json.dumps(
+            {
+                "openviking_benchmarks": {
+                    "0.3.22": {"files": {"artifact.bin": digest}}
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -42,6 +49,55 @@ def test_vendor_integrity_contract_detects_tampering(tmp_path: Path) -> None:
     artifact.write_bytes(b"modified bytes\n")
     with pytest.raises(HarnessError, match="changed"):
         verify_vendor_files(vendor, manifest)
+
+
+def test_openviking_0412_selects_matching_official_scripts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "bin" / "openviking-server"
+    server.parent.mkdir()
+    server.touch()
+    monkeypatch.setattr(
+        benchmark_harness,
+        "_command_in_current_environment",
+        lambda name: server,
+    )
+    monkeypatch.setattr(
+        benchmark_harness.importlib.metadata,
+        "version",
+        lambda package: "0.4.12",
+    )
+
+    result = validate_openviking_install()
+
+    assert result["version"] == "0.4.12"
+    assert result["benchmark_version"] == "0.4.12"
+    assert result["official_scripts_match_server"] is True
+
+
+def test_unknown_openviking_version_requires_explicit_compatibility_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "bin" / "openviking-server"
+    server.parent.mkdir()
+    server.touch()
+    monkeypatch.setattr(
+        benchmark_harness,
+        "_command_in_current_environment",
+        lambda name: server,
+    )
+    monkeypatch.setattr(
+        benchmark_harness.importlib.metadata,
+        "version",
+        lambda package: "9.9.9",
+    )
+
+    with pytest.raises(HarnessError, match="Supported versions: 0.3.22, 0.4.12"):
+        validate_openviking_install()
+
+    result = validate_openviking_install(allow_version_mismatch=True)
+    assert result["benchmark_version"] == "0.3.22"
+    assert result["official_scripts_match_server"] is False
 
 
 def test_console_script_check_uses_venv_path_without_resolving_python_symlink(

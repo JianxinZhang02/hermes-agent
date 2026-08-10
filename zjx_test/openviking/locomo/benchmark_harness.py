@@ -30,11 +30,12 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
-VENDOR_DIR = HERE / "vendor" / "openviking-v0.3.22"
+VENDOR_ROOT = HERE / "vendor"
+DEFAULT_VENDOR_VERSION = "0.3.22"
+VENDOR_DIR = VENDOR_ROOT / f"openviking-v{DEFAULT_VENDOR_VERSION}"
 MANIFEST_PATH = HERE / "source_manifest.json"
 DATASET_PATH = HERE / ".data" / "locomo10.json"
 DEFAULT_RUN_ROOT = REPO_ROOT.parent / "hermes-locomo-runs"
-OFFICIAL_OPENVIKING_VERSION = "0.3.22"
 
 PLATFORM_NAMES = {
     "telegram",
@@ -96,9 +97,16 @@ def load_source_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
 
 
 def verify_vendor_files(
-    vendor_dir: Path = VENDOR_DIR, manifest_path: Path = MANIFEST_PATH
+    vendor_dir: Path | None = None,
+    manifest_path: Path = MANIFEST_PATH,
+    *,
+    version: str = DEFAULT_VENDOR_VERSION,
 ) -> dict[str, str]:
-    expected = load_source_manifest(manifest_path)["openviking"]["files"]
+    specifications = load_source_manifest(manifest_path)["openviking_benchmarks"]
+    if version not in specifications:
+        raise HarnessError(f"No pinned OpenViking benchmark scripts for version {version}")
+    expected = specifications[version]["files"]
+    vendor_dir = vendor_dir or VENDOR_ROOT / f"openviking-v{version}"
     actual: dict[str, str] = {}
     for name, expected_hash in expected.items():
         path = vendor_dir / name
@@ -174,19 +182,35 @@ def validate_editable_hermes(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     return origins
 
 
-def validate_openviking_install(*, allow_version_mismatch: bool = False) -> dict[str, str]:
+def validate_openviking_install(*, allow_version_mismatch: bool = False) -> dict[str, Any]:
     command = _command_in_current_environment("openviking-server")
     try:
         version = importlib.metadata.version("openviking")
     except importlib.metadata.PackageNotFoundError as exc:
         raise HarnessError("The openviking Python package is not installed") from exc
-    if version != OFFICIAL_OPENVIKING_VERSION and not allow_version_mismatch:
+    supported = load_source_manifest()["openviking_benchmarks"]
+    matched = version in supported
+    if not matched and not allow_version_mismatch:
         raise HarnessError(
-            f"Strict reproduction requires openviking=={OFFICIAL_OPENVIKING_VERSION}; "
-            f"active environment has {version}. Pass --allow-openviking-version-mismatch "
-            "only for a non-strict compatibility run."
+            f"No pinned official benchmark scripts are available for openviking=={version}. "
+            f"Supported versions: {', '.join(sorted(supported))}. Pass "
+            "--allow-openviking-version-mismatch only to run the v0.3.22 protocol "
+            "as an explicitly non-strict compatibility test."
         )
-    return {"command": str(command), "version": version}
+    benchmark_version = version if matched else DEFAULT_VENDOR_VERSION
+    return {
+        "command": str(command),
+        "version": version,
+        "benchmark_version": benchmark_version,
+        "official_scripts_match_server": matched,
+    }
+
+
+def vendor_dir_for_version(version: str) -> Path:
+    path = VENDOR_ROOT / f"openviking-v{version}"
+    if not path.is_dir():
+        raise HarnessError(f"Pinned OpenViking benchmark directory is missing: {path}")
+    return path
 
 
 def require_bash() -> str:
@@ -637,6 +661,7 @@ def probe_openviking_provider(
     env: Mapping[str, str],
     *,
     timeout: float = 120.0,
+    include_agent_header: bool = True,
 ) -> str:
     session_id = f"locomo-e2e-preflight-{secrets.token_hex(8)}"
     _, response_headers = http_json(
@@ -661,8 +686,9 @@ def probe_openviking_provider(
     ov_headers = {
         "X-OpenViking-Account": env.get("OPENVIKING_ACCOUNT", "default"),
         "X-OpenViking-User": env.get("OPENVIKING_USER", "default"),
-        "X-OpenViking-Agent": env.get("OPENVIKING_AGENT", "hermes"),
     }
+    if include_agent_header:
+        ov_headers["X-OpenViking-Agent"] = env.get("OPENVIKING_AGENT", "hermes")
     if env.get("OPENVIKING_API_KEY"):
         ov_headers["X-API-Key"] = env["OPENVIKING_API_KEY"]
     deadline = time.monotonic() + timeout
@@ -730,6 +756,7 @@ def probe_judge(env: Mapping[str, str]) -> None:
 def benchmark_command(
     bash: str,
     *,
+    vendor_dir: Path = VENDOR_DIR,
     suite: str,
     run_id: str,
     result_dir: Path,
@@ -740,7 +767,7 @@ def benchmark_command(
 ) -> list[str]:
     command = [
         bash,
-        str(VENDOR_DIR / "run_full_eval.sh"),
+        str(vendor_dir / "run_full_eval.sh"),
         "--suite",
         suite,
         "--run-id",
@@ -760,13 +787,17 @@ def benchmark_command(
 
 
 def run_official_suite(
-    command: list[str], *, env: Mapping[str, str], log_path: Path
+    command: list[str],
+    *,
+    env: Mapping[str, str],
+    log_path: Path,
+    vendor_dir: Path = VENDOR_DIR,
 ) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8", buffering=1) as log:
         process = subprocess.Popen(
             command,
-            cwd=VENDOR_DIR,
+            cwd=vendor_dir,
             env=dict(env),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

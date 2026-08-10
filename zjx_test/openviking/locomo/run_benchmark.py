@@ -19,7 +19,6 @@ from benchmark_harness import (
     HERE,
     MANIFEST_PATH,
     REPO_ROOT,
-    VENDOR_DIR,
     HarnessError,
     assert_resume_parameters,
     atomic_json,
@@ -47,6 +46,7 @@ from benchmark_harness import (
     validate_editable_hermes,
     validate_openviking_install,
     validate_run_id,
+    vendor_dir_for_version,
     verify_dataset,
     verify_vendor_files,
 )
@@ -143,12 +143,14 @@ def _prepare(args: argparse.Namespace, *, mode: str) -> tuple[RunPaths, dict[str
     paths = RunPaths.create(args.run_root, run_id)
     paths.comparison.mkdir(parents=True, exist_ok=True)
 
-    vendor_hashes = verify_vendor_files()
     dataset = verify_dataset(args.dataset.expanduser().resolve())
     editable = validate_editable_hermes()
     openviking = validate_openviking_install(
         allow_version_mismatch=args.allow_openviking_version_mismatch
     )
+    benchmark_version = openviking["benchmark_version"]
+    vendor_dir = vendor_dir_for_version(benchmark_version)
+    vendor_hashes = verify_vendor_files(vendor_dir, version=benchmark_version)
     bash = require_bash()
 
     base_home = args.base_hermes_home.expanduser().resolve()
@@ -203,7 +205,7 @@ def _prepare(args: argparse.Namespace, *, mode: str) -> tuple[RunPaths, dict[str
         },
         "openviking": {
             **openviking,
-            "benchmark_source": source["openviking"],
+            "benchmark_source": source["openviking_benchmarks"][benchmark_version],
             "vendor_hashes": vendor_hashes,
             "endpoint": f"http://127.0.0.1:{args.openviking_port}",
             "workspace": str(paths.openviking_workspace),
@@ -235,6 +237,8 @@ def _prepare(args: argparse.Namespace, *, mode: str) -> tuple[RunPaths, dict[str
         "hermes_command": Path(editable["hermes"]),
         "openviking_command": Path(openviking["command"]),
         "bash": bash,
+        "vendor_dir": vendor_dir,
+        "benchmark_version": benchmark_version,
         "native_config": native_config,
         "e2e_config": e2e_config,
     }
@@ -301,6 +305,11 @@ def run_preflight(args: argparse.Namespace) -> int:
     paths, context = _prepare(args, mode="preflight")
     print("[1/5] Pinned source, dataset, editable Hermes, and config parity verified")
     print(f"      run directory: {paths.root}")
+    print(
+        "      OpenViking: "
+        f"installed={context['manifest']['openviking']['version']}, "
+        f"official benchmark=v{context['benchmark_version']}"
+    )
     try:
         print("[2/5] Probe the independent judge model")
         probe_judge(context["base_env"])
@@ -368,6 +377,7 @@ def run_preflight(args: argparse.Namespace) -> int:
                     e2e_key,
                     f"http://127.0.0.1:{args.openviking_port}",
                     e2e_env,
+                    include_agent_header=context["benchmark_version"] == "0.3.22",
                 )
             finally:
                 gateway.stop()
@@ -405,6 +415,7 @@ def _run_native(args: argparse.Namespace, context: dict[str, Any]) -> None:
     try:
         command = benchmark_command(
             context["bash"],
+            vendor_dir=context["vendor_dir"],
             suite="native",
             run_id=context["run_id"],
             result_dir=paths.native_results,
@@ -414,7 +425,10 @@ def _run_native(args: argparse.Namespace, context: dict[str, Any]) -> None:
             force_eval=args.force_eval,
         )
         run_official_suite(
-            command, env=env, log_path=paths.native_results / "logs" / "orchestrator.log"
+            command,
+            env=env,
+            log_path=paths.native_results / "logs" / "orchestrator.log",
+            vendor_dir=context["vendor_dir"],
         )
     finally:
         gateway.stop()
@@ -459,6 +473,7 @@ def _run_e2e(args: argparse.Namespace, context: dict[str, Any]) -> None:
         try:
             command = benchmark_command(
                 context["bash"],
+                vendor_dir=context["vendor_dir"],
                 suite="e2e",
                 run_id=context["run_id"],
                 result_dir=paths.e2e_results,
@@ -468,7 +483,10 @@ def _run_e2e(args: argparse.Namespace, context: dict[str, Any]) -> None:
                 force_eval=args.force_eval,
             )
             run_official_suite(
-                command, env=env, log_path=paths.e2e_results / "logs" / "orchestrator.log"
+                command,
+                env=env,
+                log_path=paths.e2e_results / "logs" / "orchestrator.log",
+                vendor_dir=context["vendor_dir"],
             )
         finally:
             gateway.stop()
@@ -525,7 +543,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allow-openviking-version-mismatch",
         action="store_true",
-        help="Allow a non-v0.3.22 server package (marks the run non-strict)",
+        help="Allow a server version without matching pinned official scripts",
     )
 
 
