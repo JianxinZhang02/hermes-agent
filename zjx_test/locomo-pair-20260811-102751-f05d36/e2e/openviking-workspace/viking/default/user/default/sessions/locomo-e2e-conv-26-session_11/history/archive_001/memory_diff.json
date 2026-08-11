@@ -1,0 +1,43 @@
+{
+    "archive_uri": "viking://user/default/sessions/locomo-e2e-conv-26-session_11/history/archive_001",
+    "trace_id": null,
+    "extracted_at": "2026-08-11T03:00:01.782175Z",
+    "operations": {
+        "adds": [
+            {
+                "uri": "viking://user/default/memories/events/2026/08/11/daughter_birthday_concert.md",
+                "memory_type": "events",
+                "after": "# Summary\nMelanie celebrated her daughter's birthday with a Matt Patterson concert on 2023-08-13, surrounded by music and joy.\n# 2026-08-11 (Tuesday) ChatLog:\n**user**: ...[Session date: 2023-08-14 14:24]\n[LoCoMo session: session_11]\n[Melanie]: Hey Caroline! Last night was amazing! We celebrated my daughter's birthday with a concert surrounded by music, joy and the warm summer breeze. Seeing my kids' smiles was so awesome, and I'm so thankful for our special moments together.\n[Caroline]: Wow, sounds wonderful!...\n...\n**user**: ...It was Matt Patterson, he is so talented! His voice and songs were amazing. What's up with you? Anything interesting going on?..."
+            },
+            {
+                "uri": "viking://user/default/memories/events/2026/08/11/pride_parade_august.md",
+                "memory_type": "events",
+                "after": "# Summary\nCaroline attended a pride parade on 2023-08-07, describing it as inspiring with people celebrating love and acceptance, which reinforced her commitment to fighting for LGBTQ+ rights.\n# 2026-08-11 (Tuesday) ChatLog:\n**user**: ...[Caroline]: Wow, Mel, glad you had a blast at the concert. A lot's happened since we talked. I went to a pride parade last Friday and it was awesome - so much energy and love everywhere. Really made me proud and reminded me how important it is to keep standing up for equality.\n[Melanie]: Wow, that's awesome! How did it feel being part of that community?\n[Melanie visual]: caption: a photo of a band performing on stage with a sign that says all are welcome\n[Caroline]: It was so inspiring, Mel! Check out the crowd. People of all kinds celebrating love and acceptance - it really pushed me to keep fighting for LGBTQ rights.\n[Caroline visual]: caption: a photo of a group of people walking down a street with balloons; query: pride parade crowd..."
+            },
+            {
+                "uri": "viking://user/default/memories/events/2026/08/11/art_sharing_session.md",
+                "memory_type": "events",
+                "after": "# Summary\nCaroline shared her paintings including 'Embracing Identity' with Melanie, explaining how her art expresses her trans experience, explores her transition, and teaches self-acceptance and embracing imperfections.\n# 2026-08-11 (Tuesday) ChatLog:\n**user**: ...[Caroline]: That pic is cool! Representing inclusivity and diversity in my art is important to me. I also use it to speak up for the LGBTQ+ community and push for acceptance. Here's a recent painting!\n[Caroline visual]: caption: a photo of a painting with a painting brush and paint on it; query: painting vibrant colors diverse representation\n[Melanie]: Wow, that rocks! What's the main idea of your art?\n[Caroline]: My art is about expressing my trans experience. It's my way of showing my story and helping people understand the trans community.\n[Caroline visual]: caption: a photo of a painting of a woman with a cow in her lap\n[Melanie]: Your art's amazing, Caroline. I love how you use it to tell your stories and teach people about trans folks. I'd love to see another painting of yours!\n[Melanie visual]: caption: a photo of a person holding a purple bowl in their hand\n[Caroline]: Thanks, Melanie. Here's one- 'Embracing Identity' is all about finding comfort and love in being yourself. The woman in the painting stands for the journey of acceptance. My aim was to show warmth, love and self-acceptance.\n[Caroline visual]: caption: a photo of a painting of a woman with a red shirt; query: painting embracing identity purple blue\n[Melanie]: Wow, Caroline, that's gorgeous! I love the self-acceptance and love theme. How does art help you with your self-discovery and acceptance journey?\n[Melanie visual]: caption: a photo of a woman is making a vase on a wheel\n[Caroline]: Art's allowed me to explore my transition and my changing body. It's been a great way to work through stuff I'm going through. I love that it teaches me to accept the beauty of imperfections.\n[Melanie]: Wow, Caroline, that's so cool! Art can be so healing and a way to really connect with who you are. It's awesome that beauty can be found in the imperfections. We're all individual and wonderfully imperfect. Thanks for sharing it with me!\n[Caroline]: Thanks, Melanie...."
+            },
+            {
+                "uri": "viking://user/default/memories/entities/person/matt_patterson.md",
+                "memory_type": "entities",
+                "after": "# Matt Patterson\n\nA talented musician known for his amazing voice and songs.\n\n## Key Facts\n- Performed at a concert that Melanie attended on 2023-08-13 for her daughter's birthday celebration"
+            }
+        ],
+        "updates": [
+            {
+                "uri": "viking://user/default/memories/profile.md",
+                "memory_type": "profile",
+                "before": "# Caroline\n- Transgender woman; began transitioning approximately 2020 (as of 2023-06-09)\n- Involved with LGBTQ+ community; attends support groups\n- Actively pursuing counseling/mental health career focused on serving trans people\n- Attended LGBTQ+ counseling workshop on 2023-06-23\n- Attended LGBTQ+ pride parade (late June/early July 2023); felt proud, grateful, and accepted\n- Joined a mentorship program for LGBTQ youth; mentors a transgender teen just like her\n- Planning an LGBTQ art show with her paintings for August 2023\n- Creates paintings inspired by LGBTQ+ spaces and community experiences\n- Values empathy, self-expression, and personal growth\n- Motivated by her own journey and support received to help others\n- Passionate about creating safe, inviting spaces for people to grow\n- Building a library of children's books (classics, multicultural stories, educational books) for when she has kids\n- Pursuing adoption as a single parent (as of 2023-05-25)\n- Attended adoption council meeting on 2023-07-14; inspired and determined to adopt\n- Researching LGBTQ+-inclusive adoption agencies\n- Moved from home country approximately 2019 (as of 2023-06-09)\n- Experienced a difficult breakup prior to June 2023\n- Has a strong support network of friends and family who provided love, guidance, and acceptance during her transition\n- Attended an LGBTQ conference on 2023-07-10; felt welcomed and accepted",
+                "after": "# Caroline\n- Transgender woman; began transitioning approximately 2020 (as of 2023-06-09)\n- Involved with LGBTQ+ community; attends support groups\n- Actively pursuing counseling/mental health career focused on serving trans people\n- Attended LGBTQ+ counseling workshop on 2023-06-23\n- Attended LGBTQ+ pride parade on 2023-08-07; found it inspiring and reaffirmed commitment to fighting for equality\n- Joined a mentorship program for LGBTQ youth; mentors a transgender teen just like her\n- Planning an LGBTQ art show with her paintings for August 2023\n- Creates paintings inspired by LGBTQ+ spaces and community experiences\n- Values empathy, self-expression, and personal growth\n- Motivated by her own journey and support received to help others\n- Passionate about creating safe, inviting spaces for people to grow\n- Building a library of children's books (classics, multicultural stories, educational books) for when she has kids\n- Pursuing adoption as a single parent (as of 2023-05-25)\n- Attended adoption council meeting on 2023-07-14; inspired and determined to adopt\n- Researching LGBTQ+-inclusive adoption agencies\n- Moved from home country approximately 2019 (as of 2023-06-09)\n- Experienced a difficult breakup prior to June 2023\n- Has a strong support network of friends and family who provided love, guidance, and acceptance during her transition\n- Attended an LGBTQ conference on 2023-07-10; felt welcomed and accepted"
+            }
+        ],
+        "deletes": []
+    },
+    "summary": {
+        "total_adds": 4,
+        "total_updates": 1,
+        "total_deletes": 0
+    }
+}

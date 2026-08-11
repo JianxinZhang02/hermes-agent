@@ -1,0 +1,1 @@
+{"pid": 20060, "kind": "hermes-gateway", "argv": ["/dfs/data/zjx/hermes_env/bin/hermes", "gateway", "run", "--force", "--no-supervise"], "start_time": 1088147404, "hermes_home": "/dfs/data/zjx/hermes-locomo-runs/locomo-pair-20260811-102751-f05d36/e2e/hermes-home"}

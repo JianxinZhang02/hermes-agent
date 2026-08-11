@@ -1,0 +1,20 @@
+timestamp,sample_id,session,conversation,total_tokens,input_tokens,output_tokens,cache_read,cache_write,status
+2026-08-11 13:48:01,conv-26,session_1,locomo-e2e-conv-26-session_1,18118,18079,39,0,0,success
+2026-08-11 13:48:07,conv-26,session_2,locomo-e2e-conv-26-session_2,19158,19118,40,0,0,success
+2026-08-11 13:48:13,conv-26,session_3,locomo-e2e-conv-26-session_3,20508,20474,34,0,0,success
+2026-08-11 13:48:19,conv-26,session_4,locomo-e2e-conv-26-session_4,19854,19829,25,0,0,success
+2026-08-11 13:48:24,conv-26,session_5,locomo-e2e-conv-26-session_5,19416,19372,44,0,0,success
+2026-08-11 13:48:31,conv-26,session_6,locomo-e2e-conv-26-session_6,19508,19477,31,0,0,success
+2026-08-11 13:48:37,conv-26,session_7,locomo-e2e-conv-26-session_7,20459,20430,29,0,0,success
+2026-08-11 13:48:43,conv-26,session_8,locomo-e2e-conv-26-session_8,21623,21604,19,0,0,success
+2026-08-11 13:48:51,conv-26,session_9,locomo-e2e-conv-26-session_9,19613,19579,34,0,0,success
+2026-08-11 13:48:57,conv-26,session_10,locomo-e2e-conv-26-session_10,20570,20535,35,0,0,success
+2026-08-11 13:49:03,conv-26,session_11,locomo-e2e-conv-26-session_11,20133,20081,52,0,0,success
+2026-08-11 13:49:10,conv-26,session_12,locomo-e2e-conv-26-session_12,19773,19748,25,0,0,success
+2026-08-11 13:49:19,conv-26,session_13,locomo-e2e-conv-26-session_13,20123,20085,38,0,0,success
+2026-08-11 13:49:25,conv-26,session_14,locomo-e2e-conv-26-session_14,21800,21776,24,0,0,success
+2026-08-11 13:49:29,conv-26,session_15,locomo-e2e-conv-26-session_15,18062,18007,55,0,0,success
+2026-08-11 13:51:11,conv-26,session_16,locomo-e2e-conv-26-session_16,18384,18283,101,0,0,success
+2026-08-11 13:52:05,conv-26,session_17,locomo-e2e-conv-26-session_17,18461,18377,84,0,0,success
+2026-08-11 13:53:25,conv-26,session_18,locomo-e2e-conv-26-session_18,18148,18074,74,0,0,success
+2026-08-11 14:03:27,conv-26,session_19,locomo-e2e-conv-26-session_19,18062,17979,83,0,0,success

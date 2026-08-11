@@ -1,0 +1,15 @@
+{
+    "archive_uri": "viking://user/default/sessions/locomo-e2e-conv-26-session_8/history/archive_002",
+    "trace_id": null,
+    "extracted_at": "2026-08-11T05:49:19.670196Z",
+    "operations": {
+        "adds": [],
+        "updates": [],
+        "deletes": []
+    },
+    "summary": {
+        "total_adds": 0,
+        "total_updates": 0,
+        "total_deletes": 0
+    }
+}

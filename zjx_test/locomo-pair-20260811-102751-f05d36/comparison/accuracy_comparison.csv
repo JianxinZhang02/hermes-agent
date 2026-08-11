@@ -1,0 +1,3 @@
+suite,questions,graded,correct,accuracy,mean_qa_latency_sec,qa_total_tokens,tool_call_count,executed_tool_call_count
+native,5,5,5,1.0,11.36644,323248,15,15
+e2e,5,5,5,1.0,7.7375,207086,7,7

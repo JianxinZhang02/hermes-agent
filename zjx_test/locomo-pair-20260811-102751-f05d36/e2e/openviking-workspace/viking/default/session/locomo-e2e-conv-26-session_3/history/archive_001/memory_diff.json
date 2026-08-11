@@ -1,0 +1,39 @@
+{
+    "archive_uri": "viking://user/default/sessions/locomo-e2e-conv-26-session_3/history/archive_001",
+    "trace_id": null,
+    "extracted_at": "2026-08-11T02:36:05.239190Z",
+    "operations": {
+        "adds": [
+            {
+                "uri": "viking://user/default/memories/events/2026/08/11/school_transgender_talk.md",
+                "memory_type": "events",
+                "after": "# Summary\nCaroline gave a talk at a school event in early June 2023 about her transgender journey, encouraging students to get involved in the LGBTQ community and inspiring them to be better allies.\n# 2026-08-11 (Tuesday) ChatLog:\n**user**: ...[Session date: 2023-06-09 19:55]\n[LoCoMo session: session_3]\n[Caroline]: Hey Melanie! How's it going? I wanted to tell you about my school event last week. It was awesome! I talked about my transgender journey and encouraged students to get involved in the LGBTQ community. It was great to see their reactions. It made me reflect on how far I've come since I started transitioning three years ago.\n[Melanie]: Hey Caroline! Great to hear from you. Sounds like your event was amazing! I'm so proud of you for spreading awareness and getting others involved in the LGBTQ community. You've come a long way since your transition - keep on inspiring people with your strength and courage!\n[Caroline]: Thanks, Mel! Your backing really means a lot. I felt super powerful giving my talk. I shared my own journey, the struggles I had and how much I've developed since coming out. It was wonderful to see how the audience related to what I said and how it inspired them to be better allies. Conversations about gender identity and inclusion are so necessary and I'm thankful for being able to give a voice to the trans community...."
+            },
+            {
+                "uri": "viking://user/default/memories/events/2026/08/11/wedding_anniversary_congrats.md",
+                "memory_type": "events",
+                "after": "# Summary\nCaroline congratulated Melanie on her wedding day after seeing photos, learning they had been married for 5 years as of June 2023.\n# 2026-08-11 (Tuesday) ChatLog:\n**user**: ...Who supports you, Mel?\n[Melanie]: I'm lucky to have my husband and kids; they keep me motivated.\n[Melanie visual]: caption: a photo of a man and a little girl standing in front of a waterfall; query: husband kids hiking nature\n[Caroline]: Wow, what an amazing family pic! How long have you been married?\n[Melanie]: 5 years already! Time flies- feels like just yesterday I put this dress on! Thanks, Caroline!\n[Melanie visual]: caption: a photo of a bride in a wedding dress holding a bouquet; query: wedding day\n[Caroline]: Congrats, Melanie! You both looked so great on your wedding day! Wishing you many happy years together!\n[Melanie]: Thanks, Caroline! Appreciate your kind words. Looking forward to more happy years. Our family and moments make it all worth it...."
+            }
+        ],
+        "updates": [
+            {
+                "uri": "viking://user/default/peers/hermes/memories/entities/person/melanie.md",
+                "memory_type": "entities",
+                "before": "# Melanie\n\n- Friend of Caroline\n- Mother with kids\n- Works full-time alongside parenting\n\n## Hobbies\n- Painting — created a lake sunrise painting around 2022\n- Uses painting as emotional expression and relaxation\n- Plays violin\n- Runs and reads for self-care\n\n## Key Facts\n- Ran a charity race for mental health on 2023-05-23\n- Prioritizes self-care to better support her family\n- Family planning a camping trip in June 2023\n\n## Relations\n- Close friend of Caroline; they chat regularly about life updates",
+                "after": "# Melanie\n\n- Married for 5 years (as of 2023-06-09)\n- Mother with kids\n- Works full-time alongside parenting\n\n## Hobbies\n- Painting — created a lake sunrise painting around 2022\n- Uses painting as emotional expression and relaxation\n- Plays violin\n- Runs and reads for self-care\n- Enjoys outdoor family activities (hiking, picnics)\n\n## Key Facts\n- Ran a charity race for mental health on 2023-05-23\n- Prioritizes self-care to better support her family\n- Family planning a camping trip in June 2023\n\n## Relations\n- Married; has husband and children\n- Close friend of Caroline; they chat regularly about life updates"
+            },
+            {
+                "uri": "viking://user/default/memories/profile.md",
+                "memory_type": "profile",
+                "before": "# Caroline\n- Involved with LGBTQ+ community; attends support groups\n- Aspires to work in counseling or mental health field\n- Values empathy, self-expression, and personal growth\n- Interested in supporting others with similar life experiences\n- Pursuing adoption as a single parent (as of 2023-05-25)\n- Researching LGBTQ+-inclusive adoption agencies",
+                "after": "# Caroline\n- Transgender woman; began transitioning approximately 2020 (as of 2023-06-09)\n- Involved with LGBTQ+ community; attends support groups\n- Aspires to work in counseling or mental health field\n- Values empathy, self-expression, and personal growth\n- Interested in supporting others with similar life experiences\n- Pursuing adoption as a single parent (as of 2023-05-25)\n- Researching LGBTQ+-inclusive adoption agencies\n- Moved from home country approximately 2019 (as of 2023-06-09)\n- Experienced a difficult breakup prior to June 2023"
+            }
+        ],
+        "deletes": []
+    },
+    "summary": {
+        "total_adds": 2,
+        "total_updates": 2,
+        "total_deletes": 0
+    }
+}
