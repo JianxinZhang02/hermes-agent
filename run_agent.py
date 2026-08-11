@@ -4105,7 +4105,10 @@ class AIAgent:
         if not (user_text and response_text):
             return
         try:
-            sync_kwargs = {"session_id": self.session_id or ""}
+            sync_kwargs = {
+                "session_id": self.session_id or "",
+                "task_id": getattr(self, "_current_task_id", "") or "",
+            }
             if messages is not None:
                 sync_kwargs["messages"] = messages
             self._memory_manager.sync_all(

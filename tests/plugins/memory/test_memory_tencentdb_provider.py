@@ -239,6 +239,42 @@ def test_prefetch_combines_l1_l2_l3_with_provenance(provider):
         assert call["task_id"] == "task-a"
 
 
+def test_prefetch_bounds_long_agent_turn_for_gateway_search(provider):
+    query = "start-subject " + ("middle " * 600) + "latest-question"
+
+    provider.prefetch(query, session_id="session-long")
+
+    client = provider._client
+    search = next(
+        kwargs for method, kwargs in client.calls if method == "atomic_search"
+    )
+    bounded = search["query"]
+    assert len(bounded) == tdai._MAX_SEARCH_QUERY_CHARS
+    assert bounded.startswith("start-subject")
+    assert bounded.endswith("latest-question")
+    assert "truncated for memory search" in bounded
+
+
+def test_explicit_search_tools_bound_gateway_queries(provider):
+    long_query = "begin " + ("memory " * 600) + "end"
+
+    provider.handle_tool_call("memory_tencentdb_memory_search", {"query": long_query})
+    provider.handle_tool_call(
+        "memory_tencentdb_conversation_search", {"query": long_query}
+    )
+
+    client = provider._client
+    for method in ("atomic_search", "conversation_search"):
+        search = next(
+            kwargs
+            for call_name, kwargs in reversed(client.calls)
+            if call_name == method
+        )
+        assert len(search["query"]) == tdai._MAX_SEARCH_QUERY_CHARS
+        assert search["query"].startswith("begin")
+        assert search["query"].endswith("end")
+
+
 def test_scope_aware_recall_can_override_user_agent_and_workspace(provider):
     provider._client.calls.clear()
     provider.recall_memory(
@@ -258,6 +294,151 @@ def test_scope_aware_recall_can_override_user_agent_and_workspace(provider):
         assert call["agent_id"] == "reviewer"
         assert call["user_id"] == "user-b"
         assert call["task_id"] == "task-b"
+
+
+def test_manager_sync_uses_same_scope_as_recall(provider):
+    manager = MemoryManager(external_prefetch_timeout=1.0)
+    manager.add_provider(provider)
+    scope = ProviderScope(
+        user_id="user-b",
+        agent_id="reviewer",
+        session_id="session-b",
+        task_id="task-b",
+        workspace="project-b",
+    )
+
+    manager.prefetch_all("database", scope=scope)
+    manager.sync_all(
+        "remember database",
+        "database remembered",
+        session_id="session-b",
+        task_id="task-b",
+        scope=scope,
+    )
+    assert manager.flush_pending(timeout=1.0)
+    assert provider._drain_sync_threads(timeout=1.0)
+
+    capture = next(
+        kwargs
+        for method, kwargs in reversed(provider._client.calls)
+        if method == "conversation_add"
+    )
+    assert capture["team_id"] == "project-b"
+    assert capture["agent_id"] == "reviewer"
+    assert capture["user_id"] == "user-b"
+    assert capture["task_id"] == "task-b"
+
+
+def test_ephemeral_hermes_turn_task_does_not_block_cross_session_recall(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    FakeSupervisor.instances.clear()
+    monkeypatch.setattr(tdai, "GatewaySupervisor", FakeSupervisor)
+    monkeypatch.setattr(tdai, "_discover_gateway_cmd", lambda: None)
+    instance = tdai.MemoryTencentdbProvider()
+    instance.initialize(
+        "session-a",
+        hermes_home=str(tmp_path),
+        platform="api_server",
+        user_id="user-a",
+        agent_identity="coder",
+        agent_workspace="project-a",
+    )
+    manager = MemoryManager(external_prefetch_timeout=1.0)
+    manager.add_provider(instance)
+    try:
+        scope_a = ProviderScope(
+            user_id="user-a",
+            agent_id="coder",
+            session_id="session-a",
+            task_id="ephemeral-session-a",
+            workspace="project-a",
+        )
+        manager.prefetch_all("database", scope=scope_a)
+        manager.sync_all(
+            "use MySQL",
+            "acknowledged",
+            session_id="session-a",
+            task_id="ephemeral-session-a",
+            scope=scope_a,
+        )
+        assert manager.flush_pending(timeout=1.0)
+        assert instance._drain_sync_threads(timeout=1.0)
+
+        scope_b = ProviderScope(
+            user_id="user-a",
+            agent_id="coder",
+            session_id="session-b",
+            task_id="ephemeral-session-b",
+            workspace="project-a",
+        )
+        manager.prefetch_all("which database", scope=scope_b)
+        scoped_calls = [
+            kwargs
+            for method, kwargs in instance._client.calls
+            if method in {"atomic_search", "conversation_add"}
+        ]
+        assert scoped_calls
+        assert all(call["task_id"] == "" for call in scoped_calls)
+    finally:
+        manager.shutdown_all()
+
+
+def test_configured_tenant_scope_wins_for_both_recall_and_write(monkeypatch, tmp_path):
+    save_config(
+        {
+            "team_id": "fixed-team",
+            "agent_id": "fixed-agent",
+            "user_id": "fixed-user",
+        },
+        tmp_path,
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    FakeSupervisor.instances.clear()
+    monkeypatch.setattr(tdai, "GatewaySupervisor", FakeSupervisor)
+    monkeypatch.setattr(tdai, "_discover_gateway_cmd", lambda: None)
+    instance = tdai.MemoryTencentdbProvider()
+    instance.initialize(
+        "session-fixed",
+        hermes_home=str(tmp_path),
+        platform="api_server",
+        user_id="runtime-user",
+        agent_identity="runtime-agent",
+        agent_workspace="runtime-team",
+    )
+    manager = MemoryManager(external_prefetch_timeout=1.0)
+    manager.add_provider(instance)
+    try:
+        runtime_scope = ProviderScope(
+            user_id="other-user",
+            agent_id="other-agent",
+            session_id="session-fixed",
+            workspace="other-team",
+            task_id="ephemeral-turn",
+        )
+        manager.prefetch_all("database", scope=runtime_scope)
+        manager.sync_all(
+            "remember",
+            "done",
+            session_id="session-fixed",
+            task_id="ephemeral-turn",
+            scope=runtime_scope,
+        )
+        assert manager.flush_pending(timeout=1.0)
+        assert instance._drain_sync_threads(timeout=1.0)
+        scoped_calls = [
+            kwargs
+            for method, kwargs in instance._client.calls
+            if method in {"atomic_search", "conversation_add"}
+        ]
+        assert scoped_calls
+        assert all(call["team_id"] == "fixed-team" for call in scoped_calls)
+        assert all(call["agent_id"] == "fixed-agent" for call in scoped_calls)
+        assert all(call["user_id"] == "fixed-user" for call in scoped_calls)
+        assert all(call["task_id"] == "" for call in scoped_calls)
+    finally:
+        manager.shutdown_all()
 
 
 def test_sync_turn_and_session_switch_keep_session_isolation(provider):

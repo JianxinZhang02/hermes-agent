@@ -28,6 +28,7 @@ from benchmark_harness import (
     create_openviking_config,
     current_python_command,
     default_run_id,
+    ensure_openviking_session_layout_compatibility,
     git_revision,
     immutable_run_parameters,
     load_base_environment,
@@ -139,6 +140,16 @@ def _judge_settings(env: dict[str, str]) -> tuple[str, str, str]:
     return base_url, token, model
 
 
+def _prepare_openviking_session_layout(context: dict[str, Any]) -> dict[str, str]:
+    base_env = context["base_env"]
+    paths: RunPaths = context["paths"]
+    return ensure_openviking_session_layout_compatibility(
+        paths.openviking_workspace,
+        account=base_env.get("OPENVIKING_ACCOUNT", "default"),
+        user=base_env.get("OPENVIKING_USER", "default"),
+    )
+
+
 def _prepare(args: argparse.Namespace, *, mode: str) -> tuple[RunPaths, dict[str, Any]]:
     run_id = validate_run_id(args.run_id or default_run_id(f"locomo-{mode}"))
     paths = RunPaths.create(args.run_root, run_id)
@@ -211,6 +222,9 @@ def _prepare(args: argparse.Namespace, *, mode: str) -> tuple[RunPaths, dict[str
             "endpoint": f"http://127.0.0.1:{args.openviking_port}",
             "workspace": str(paths.openviking_workspace),
             "config": str(paths.openviking_config),
+            "session_layout_compatibility": (
+                "viking/<account>/session -> viking/<account>/user/<user>/sessions"
+            ),
         },
         "dataset": dataset,
         "judge": {"base_url": judge_url, "model": judge_model, "token": "<redacted>"},
@@ -347,6 +361,7 @@ def run_preflight(args: argparse.Namespace) -> int:
         _require_free_port(args.openviking_port, "OpenViking")
         ov_env = copy.deepcopy(context["base_env"])
         ov_env["OPENVIKING_CONFIG_FILE"] = str(paths.openviking_config)
+        _prepare_openviking_session_layout(context)
         print("[4/5] Start isolated OpenViking and isolated e2e Hermes")
         openviking = start_openviking(
             context["openviking_command"],
@@ -446,6 +461,7 @@ def _run_e2e(args: argparse.Namespace, context: dict[str, Any]) -> None:
             "session IDs are deterministic. Use a new --run-id for a fresh strict run."
         )
     _require_free_port(args.openviking_port, "OpenViking")
+    _prepare_openviking_session_layout(context)
     ov_env = copy.deepcopy(context["base_env"])
     ov_env["OPENVIKING_CONFIG_FILE"] = str(paths.openviking_config)
     openviking = start_openviking(

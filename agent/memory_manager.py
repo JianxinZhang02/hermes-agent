@@ -660,6 +660,11 @@ class MemoryManager:
     @staticmethod
     def _provider_sync_accepts_messages(provider: MemoryProvider) -> bool:
         """Return whether sync_turn accepts a messages keyword."""
+        return MemoryManager._provider_sync_accepts_keyword(provider, "messages")
+
+    @staticmethod
+    def _provider_sync_accepts_keyword(provider: MemoryProvider, keyword: str) -> bool:
+        """Return whether sync_turn accepts a named compatibility extension."""
         try:
             signature = inspect.signature(provider.sync_turn)
         except (TypeError, ValueError):
@@ -667,7 +672,7 @@ class MemoryManager:
         params = list(signature.parameters.values())
         if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
             return True
-        return "messages" in signature.parameters
+        return keyword in signature.parameters
 
     def sync_all(
         self,
@@ -675,6 +680,8 @@ class MemoryManager:
         assistant_content: str,
         *,
         session_id: str = "",
+        task_id: str = "",
+        scope: Optional[ProviderScope] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Sync a completed turn to all providers.
@@ -702,23 +709,27 @@ class MemoryManager:
         if not clean_user_content:
             return
         user_content = clean_user_content
+        effective_scope = scope or self.scope
+        if session_id or task_id:
+            effective_scope = replace(
+                effective_scope,
+                session_id=session_id or effective_scope.session_id,
+                task_id=task_id or effective_scope.task_id,
+            )
 
         def _run() -> None:
             for provider in providers:
                 try:
+                    sync_kwargs: Dict[str, Any] = {"session_id": session_id}
                     if messages is not None and self._provider_sync_accepts_messages(provider):
-                        provider.sync_turn(
-                            user_content,
-                            assistant_content,
-                            session_id=session_id,
-                            messages=messages,
-                        )
-                    else:
-                        provider.sync_turn(
-                            user_content,
-                            assistant_content,
-                            session_id=session_id,
-                        )
+                        sync_kwargs["messages"] = messages
+                    if self._provider_sync_accepts_keyword(provider, "scope"):
+                        sync_kwargs["scope"] = effective_scope
+                    provider.sync_turn(
+                        user_content,
+                        assistant_content,
+                        **sync_kwargs,
+                    )
                 except Exception as e:
                     logger.warning(
                         "Memory provider '%s' sync_turn failed: %s",

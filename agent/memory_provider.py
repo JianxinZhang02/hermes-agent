@@ -139,6 +139,7 @@ class MemoryProvider(ABC):
         *,
         session_id: str = "",
         messages: Optional[List[Dict[str, Any]]] = None,
+        scope: Optional[ProviderScope] = None,
     ) -> None:
         """Persist a completed turn to the backend.
 
@@ -148,6 +149,10 @@ class MemoryProvider(ABC):
         ``messages`` is the OpenAI-style conversation message list as of the
         completed turn, including any assistant tool calls and tool results.
         Providers that do not need raw turn context can ignore it.
+
+        ``scope`` is the same resolved provider scope used for recall on this
+        turn. It is an optional compatibility extension: ``MemoryManager``
+        passes it only to provider implementations that declare the keyword.
         """
 
     @abstractmethod

@@ -185,6 +185,28 @@ def _discover_gateway_cmd() -> Optional[str]:
 # Search tool limit bounds (shared by memory_search and conversation_search).
 _DEFAULT_SEARCH_LIMIT = 5
 _MAX_SEARCH_LIMIT = 20
+# The Gateway validates search queries at the HTTP boundary.  Agent turns can
+# legitimately be much larger (for example, transcript-ingestion turns), so
+# keep recall best-effort instead of letting an oversized query disable L1 for
+# the whole turn.
+_MAX_SEARCH_QUERY_CHARS = 2048
+
+
+def _bounded_search_query(raw: Any) -> str:
+    """Return a non-empty Gateway-compatible query of at most 2048 chars.
+
+    Retaining both ends works better than a prefix-only cut for long agent
+    turns: the subject is commonly introduced near the start while the actual
+    question or latest fact is near the end.
+    """
+    query = str(raw or "").strip()
+    if len(query) <= _MAX_SEARCH_QUERY_CHARS:
+        return query
+    marker = "\n...[truncated for memory search]...\n"
+    remaining = _MAX_SEARCH_QUERY_CHARS - len(marker)
+    head = remaining // 2
+    tail = remaining - head
+    return f"{query[:head]}{marker}{query[-tail:]}"
 
 
 def _coerce_limit(
@@ -419,6 +441,9 @@ class MemoryTencentdbProvider(MemoryProvider):
         self._team_id = _DEFAULT_TEAM_ID
         self._agent_id = _DEFAULT_AGENT_ID
         self._task_id = ""
+        self._fixed_user_id = ""
+        self._fixed_team_id = ""
+        self._fixed_agent_id = ""
         self._gateway_available = False
         self._initialized = False
         self._write_enabled = True
@@ -649,19 +674,22 @@ class MemoryTencentdbProvider(MemoryProvider):
         self._write_enabled = (
             agent_context not in _NON_PRIMARY_CONTEXTS and platform != "cron"
         )
+        self._fixed_user_id = str(self._config.get("user_id") or "")
+        self._fixed_team_id = str(self._config.get("team_id") or "")
+        self._fixed_agent_id = str(self._config.get("agent_id") or "")
         self._user_id = str(
-            self._config.get("user_id")
+            self._fixed_user_id
             or kwargs.get("user_id")
             or kwargs.get("user_id_alt")
             or _DEFAULT_USER_ID
         )
         self._team_id = str(
-            self._config.get("team_id")
+            self._fixed_team_id
             or kwargs.get("agent_workspace")
             or _DEFAULT_TEAM_ID
         )
         self._agent_id = str(
-            self._config.get("agent_id")
+            self._fixed_agent_id
             or kwargs.get("agent_identity")
             or _DEFAULT_AGENT_ID
         )
@@ -774,14 +802,33 @@ class MemoryTencentdbProvider(MemoryProvider):
 
     def recall_memory(self, query: str, *, scope: ProviderScope) -> str:
         """Recall using the manager-provided scope when it is populated."""
+        team_id, agent_id, user_id, task_id = self._resolve_provider_scope(scope)
         return self._prefetch_scoped(
             query,
             session_id=scope.session_id or self._session_id,
-            team_id=scope.workspace or self._team_id,
-            agent_id=scope.agent_id or self._agent_id,
-            user_id=scope.user_id or self._user_id,
-            task_id=scope.task_id or self._task_id,
+            team_id=team_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            task_id=task_id,
         )
+
+    def _resolve_provider_scope(
+        self, scope: Optional[ProviderScope]
+    ) -> tuple[str, str, str, str]:
+        """Resolve one symmetric read/write scope.
+
+        Configured tenant IDs are explicit fixed overrides.  A Hermes turn's
+        task ID is an execution-isolation token and is therefore used only
+        when the provider was initialized with a durable task scope; otherwise
+        filtering by it would make every new conversation unable to recall
+        long-term memory written by earlier conversations.
+        """
+        scope = scope or ProviderScope()
+        team_id = self._fixed_team_id or scope.workspace or self._team_id
+        agent_id = self._fixed_agent_id or scope.agent_id or self._agent_id
+        user_id = self._fixed_user_id or scope.user_id or self._user_id
+        task_id = (scope.task_id or self._task_id) if self._task_id else ""
+        return team_id, agent_id, user_id, task_id
 
     def _prefetch_scoped(
         self,
@@ -797,6 +844,7 @@ class MemoryTencentdbProvider(MemoryProvider):
 
         v3: parallel calls to atomic/search (L1) + core/read (L3) + scenario/ls (L2).
         """
+        query = _bounded_search_query(query)
         if not query:
             return ""
         if not self._ensure_alive_for_request() or self._client is None:
@@ -929,6 +977,7 @@ class MemoryTencentdbProvider(MemoryProvider):
         *,
         session_id: str = "",
         messages: Optional[List[Dict[str, Any]]] = None,
+        scope: Optional[ProviderScope] = None,
     ) -> None:
         """Send the turn to Gateway for capture (non-blocking).
 
@@ -943,6 +992,7 @@ class MemoryTencentdbProvider(MemoryProvider):
 
         effective_session = session_id or self._session_id
         client = self._client
+        team_id, agent_id, user_id, task_id = self._resolve_provider_scope(scope)
 
         # Build v3 messages array with ISO 8601 timestamps
         from datetime import datetime, timezone
@@ -979,10 +1029,10 @@ class MemoryTencentdbProvider(MemoryProvider):
                 client.conversation_add(
                     messages=messages,
                     session_id=effective_session,
-                    team_id=self._team_id,
-                    agent_id=self._agent_id,
-                    user_id=self._user_id,
-                    task_id=self._task_id,
+                    team_id=team_id,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    task_id=task_id,
                     timeout=float(self._config.get("write_timeout") or 15.0),
                 )
                 self._record_success()
@@ -1103,7 +1153,7 @@ class MemoryTencentdbProvider(MemoryProvider):
 
         try:
             if tool_name == "memory_tencentdb_memory_search":
-                query = args.get("query", "")
+                query = _bounded_search_query(args.get("query", ""))
                 if not query:
                     return json.dumps({"error": "Missing required parameter: query"})
                 result = self._client.atomic_search(
@@ -1126,7 +1176,7 @@ class MemoryTencentdbProvider(MemoryProvider):
                 )
 
             if tool_name == "memory_tencentdb_conversation_search":
-                query = args.get("query", "")
+                query = _bounded_search_query(args.get("query", ""))
                 if not query:
                     return json.dumps({"error": "Missing required parameter: query"})
                 result = self._client.conversation_search(

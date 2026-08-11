@@ -19,6 +19,7 @@ from benchmark_harness import (
     child_environment,
     compare_results,
     create_openviking_config,
+    ensure_openviking_session_layout_compatibility,
     isolated_config,
     materialize_hermes_homes,
     redact,
@@ -234,6 +235,39 @@ def test_openviking_runtime_config_uses_isolated_workspace(tmp_path: Path) -> No
     assert Path(config["storage"]["workspace"]) == workspace.resolve()
     assert config["embedding"]["dense"]["model"] == "embedding-model"
     assert workspace.is_dir()
+
+
+def test_openviking_session_layout_compatibility_targets_current_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[Path, Path, bool]] = []
+
+    def fake_symlink_to(
+        link: Path, target: Path, target_is_directory: bool = False
+    ) -> None:
+        calls.append((link, target, target_is_directory))
+
+    monkeypatch.setattr(Path, "symlink_to", fake_symlink_to)
+    workspace = tmp_path / "workspace"
+
+    result = ensure_openviking_session_layout_compatibility(workspace)
+
+    legacy = workspace / "viking" / "default" / "session"
+    canonical = workspace / "viking" / "default" / "user" / "default" / "sessions"
+    assert calls == [(legacy, Path("user/default/sessions"), True)]
+    assert result == {"legacy": str(legacy), "canonical": str(canonical)}
+    assert canonical.is_dir()
+
+
+def test_openviking_session_layout_compatibility_rejects_conflicting_directory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    legacy = workspace / "viking" / "default" / "session"
+    legacy.mkdir(parents=True)
+
+    with pytest.raises(HarnessError, match="already exists and is not a symlink"):
+        ensure_openviking_session_layout_compatibility(workspace)
 
 
 def test_model_manifest_is_selective_and_redacted() -> None:

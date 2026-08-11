@@ -371,6 +371,62 @@ def create_openviking_config(source: Path, destination: Path, workspace: Path) -
     return config
 
 
+def ensure_openviking_session_layout_compatibility(
+    workspace: Path,
+    *,
+    account: str = "default",
+    user: str = "default",
+) -> dict[str, str]:
+    """Expose the current OpenViking session tree at the benchmark's legacy path.
+
+    OpenViking 0.4.x stores sessions below
+    ``viking/<account>/user/<user>/sessions``.  Its pinned Hermes LoCoMo scripts
+    still inspect ``viking/<account>/session`` for archive ``.done`` markers.
+    A relative directory symlink keeps the vendored scripts byte-for-byte
+    unchanged while making their completion check observe the real archives.
+    """
+
+    def validate_component(value: str, label: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or cleaned in {".", ".."} or Path(cleaned).name != cleaned:
+            raise HarnessError(f"Unsafe OpenViking {label} for workspace layout: {value!r}")
+        return cleaned
+
+    account = validate_component(account, "account")
+    user = validate_component(user, "user")
+    account_root = workspace.resolve() / "viking" / account
+    canonical = account_root / "user" / user / "sessions"
+    legacy = account_root / "session"
+    relative_target = Path("user") / user / "sessions"
+
+    canonical.mkdir(parents=True, exist_ok=True)
+    if legacy.is_symlink():
+        actual = (legacy.parent / os.readlink(legacy)).resolve()
+        if actual != canonical.resolve():
+            raise HarnessError(
+                f"OpenViking benchmark compatibility link {legacy} points to {actual}, "
+                f"expected {canonical}"
+            )
+    elif legacy.exists():
+        raise HarnessError(
+            f"Cannot create OpenViking benchmark compatibility link because {legacy} "
+            "already exists and is not a symlink. Use a fresh --run-id."
+        )
+    else:
+        try:
+            legacy.symlink_to(relative_target, target_is_directory=True)
+        except OSError as exc:
+            raise HarnessError(
+                "Could not create the OpenViking session-layout compatibility link. "
+                "Run this benchmark in WSL/Linux and use a fresh --run-id."
+            ) from exc
+
+    return {
+        "legacy": str(legacy),
+        "canonical": str(canonical),
+    }
+
+
 def safe_model_config(config: Mapping[str, Any]) -> dict[str, Any]:
     found: dict[str, Any] = {}
 
