@@ -38,6 +38,7 @@ from benchmark_harness import (
     probe_hermes_model,
     probe_judge,
     probe_openviking_provider,
+    remove_openviking_session_layout_compatibility,
     require_bash,
     run_official_suite,
     run_logged_command,
@@ -156,6 +157,60 @@ def _prepare_openviking_session_layout(context: dict[str, Any]) -> dict[str, str
         paths.openviking_workspace,
         account=base_env.get("OPENVIKING_ACCOUNT", "default"),
         user=base_env.get("OPENVIKING_USER", "default"),
+    )
+
+
+def _remove_openviking_session_layout(context: dict[str, Any]) -> bool:
+    base_env = context["base_env"]
+    paths: RunPaths = context["paths"]
+    return remove_openviking_session_layout_compatibility(
+        paths.openviking_workspace,
+        account=base_env.get("OPENVIKING_ACCOUNT", "default"),
+    )
+
+
+def _start_openviking_runtime(
+    args: argparse.Namespace,
+    context: dict[str, Any],
+    *,
+    log_path: Path,
+):
+    """Start AGFS without the legacy link, then expose it to benchmark scripts."""
+
+    paths: RunPaths = context["paths"]
+    _remove_openviking_session_layout(context)
+    ov_env = copy.deepcopy(context["base_env"])
+    ov_env["OPENVIKING_CONFIG_FILE"] = str(paths.openviking_config)
+    process = start_openviking(
+        context["openviking_command"],
+        config_path=paths.openviking_config,
+        port=args.openviking_port,
+        env=ov_env,
+        log_path=log_path,
+        startup_timeout=args.startup_timeout,
+    )
+    try:
+        _prepare_openviking_session_layout(context)
+    except Exception:
+        process.stop()
+        raise
+    return process
+
+
+def _stop_openviking_runtime(context: dict[str, Any], process: Any) -> None:
+    try:
+        _remove_openviking_session_layout(context)
+    finally:
+        process.stop()
+
+
+def _openviking_workspace_has_provider_data(workspace: Path) -> bool:
+    """Distinguish real provider files from empty compatibility scaffolding."""
+
+    if not workspace.exists():
+        return False
+    return any(
+        path.is_file() and not path.is_symlink() for path in workspace.rglob("*")
     )
 
 
@@ -371,17 +426,11 @@ def run_preflight(args: argparse.Namespace) -> int:
             gateway.stop()
 
         _require_free_port(args.openviking_port, "OpenViking")
-        ov_env = copy.deepcopy(context["base_env"])
-        ov_env["OPENVIKING_CONFIG_FILE"] = str(paths.openviking_config)
-        _prepare_openviking_session_layout(context)
         print("[4/5] Start isolated OpenViking and isolated e2e Hermes")
-        openviking = start_openviking(
-            context["openviking_command"],
-            config_path=paths.openviking_config,
-            port=args.openviking_port,
-            env=ov_env,
+        openviking = _start_openviking_runtime(
+            args,
+            context,
             log_path=paths.e2e_results / "logs" / "openviking-preflight.log",
-            startup_timeout=args.startup_timeout,
         )
         try:
             _require_free_port(args.gateway_port, "Hermes gateway")
@@ -413,7 +462,7 @@ def run_preflight(args: argparse.Namespace) -> int:
             finally:
                 gateway.stop()
         finally:
-            openviking.stop()
+            _stop_openviking_runtime(context, openviking)
 
         print("[5/5] All real-service preflight checks passed")
         _update_manifest(context, status="passed", completed_at=utc_now())
@@ -473,16 +522,10 @@ def _run_e2e(args: argparse.Namespace, context: dict[str, Any]) -> None:
             "session IDs are deterministic. Use a new --run-id for a fresh strict run."
         )
     _require_free_port(args.openviking_port, "OpenViking")
-    _prepare_openviking_session_layout(context)
-    ov_env = copy.deepcopy(context["base_env"])
-    ov_env["OPENVIKING_CONFIG_FILE"] = str(paths.openviking_config)
-    openviking = start_openviking(
-        context["openviking_command"],
-        config_path=paths.openviking_config,
-        port=args.openviking_port,
-        env=ov_env,
+    openviking = _start_openviking_runtime(
+        args,
+        context,
         log_path=paths.e2e_results / "logs" / "openviking.log",
-        startup_timeout=args.startup_timeout,
     )
     try:
         _require_free_port(args.gateway_port, "Hermes gateway")
@@ -523,7 +566,7 @@ def _run_e2e(args: argparse.Namespace, context: dict[str, Any]) -> None:
         finally:
             gateway.stop()
     finally:
-        openviking.stop()
+        _stop_openviking_runtime(context, openviking)
 
 
 def run_pair(args: argparse.Namespace) -> int:
@@ -940,7 +983,10 @@ def run_build(args: argparse.Namespace) -> int:
             "A partial native import exists without a success manifest. Use a new --run-id "
             "to avoid duplicate history rows."
         )
-    if any(paths.openviking_workspace.iterdir()) and not e2e_csv.exists():
+    if (
+        _openviking_workspace_has_provider_data(paths.openviking_workspace)
+        and not e2e_csv.exists()
+    ):
         raise HarnessError(
             "A non-empty OpenViking workspace exists without an import success manifest. "
             "Use a new --run-id to preserve baseline isolation."
@@ -985,16 +1031,10 @@ def run_build(args: argparse.Namespace) -> int:
         _update_build_manifest(context, status="building_e2e")
         print("[2/3] Build and commit OpenViking memory for the same conversation")
         _require_free_port(args.openviking_port, "OpenViking")
-        _prepare_openviking_session_layout(context)
-        ov_env = copy.deepcopy(context["base_env"])
-        ov_env["OPENVIKING_CONFIG_FILE"] = str(paths.openviking_config)
-        openviking = start_openviking(
-            context["openviking_command"],
-            config_path=paths.openviking_config,
-            port=args.openviking_port,
-            env=ov_env,
+        openviking = _start_openviking_runtime(
+            args,
+            context,
             log_path=e2e_csv.parent / "logs" / "openviking.log",
-            startup_timeout=args.startup_timeout,
         )
         try:
             _require_free_port(args.gateway_port, "Hermes gateway")
@@ -1027,7 +1067,7 @@ def run_build(args: argparse.Namespace) -> int:
             finally:
                 gateway.stop()
         finally:
-            openviking.stop()
+            _stop_openviking_runtime(context, openviking)
 
         print("[3/3] Freeze and fingerprint the reusable Memory Baseline")
         artifacts = _validate_build_outputs(paths, manifest["scope"])
@@ -1199,16 +1239,10 @@ def _run_e2e_qa(
 ) -> None:
     paths: RunPaths = context["paths"]
     _require_free_port(args.openviking_port, "OpenViking")
-    _prepare_openviking_session_layout(context)
-    ov_env = copy.deepcopy(context["base_env"])
-    ov_env["OPENVIKING_CONFIG_FILE"] = str(paths.openviking_config)
-    openviking = start_openviking(
-        context["openviking_command"],
-        config_path=paths.openviking_config,
-        port=args.openviking_port,
-        env=ov_env,
+    openviking = _start_openviking_runtime(
+        args,
+        context,
         log_path=output.parent / "logs" / "openviking.log",
-        startup_timeout=args.startup_timeout,
     )
     try:
         _require_free_port(args.gateway_port, "Hermes gateway")
@@ -1241,7 +1275,7 @@ def _run_e2e_qa(
         finally:
             gateway.stop()
     finally:
-        openviking.stop()
+        _stop_openviking_runtime(context, openviking)
 
 
 def _load_build_collection(args: argparse.Namespace) -> tuple[RunPaths, dict[str, Any]]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -26,6 +27,7 @@ from benchmark_harness import (
     isolated_config,
     materialize_hermes_homes,
     openviking_memory_fingerprint,
+    remove_openviking_session_layout_compatibility,
     redact,
     safe_model_config,
     sqlite_session_fingerprint,
@@ -273,6 +275,85 @@ def test_openviking_session_layout_compatibility_rejects_conflicting_directory(
 
     with pytest.raises(HarnessError, match="already exists and is not a symlink"):
         ensure_openviking_session_layout_compatibility(workspace)
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="directory symlinks require WSL or Windows privilege"
+)
+def test_openviking_compatibility_link_is_removable_before_agfs_start(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    layout = ensure_openviking_session_layout_compatibility(workspace)
+    legacy = Path(layout["legacy"])
+
+    assert legacy.is_symlink()
+    assert remove_openviking_session_layout_compatibility(workspace) is True
+    assert not legacy.exists()
+    assert not legacy.is_symlink()
+    assert remove_openviking_session_layout_compatibility(workspace) is False
+
+
+def test_openviking_runtime_adds_legacy_link_only_after_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = run_benchmark.RunPaths.create(tmp_path, "run-1")
+    paths.openviking_workspace.mkdir(parents=True)
+    lifecycle: list[str] = []
+
+    class FakeProcess:
+        stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    process = FakeProcess()
+
+    def fake_start(*args: object, **kwargs: object) -> FakeProcess:
+        lifecycle.append("start")
+        return process
+
+    monkeypatch.setattr(run_benchmark, "start_openviking", fake_start)
+    monkeypatch.setattr(
+        run_benchmark,
+        "_remove_openviking_session_layout",
+        lambda context: lifecycle.append("remove"),
+    )
+    monkeypatch.setattr(
+        run_benchmark,
+        "_prepare_openviking_session_layout",
+        lambda context: lifecycle.append("prepare"),
+    )
+    args = SimpleNamespace(openviking_port=1934, startup_timeout=30)
+    context = {
+        "paths": paths,
+        "base_env": {},
+        "openviking_command": tmp_path / "openviking-server",
+    }
+
+    returned = run_benchmark._start_openviking_runtime(
+        args, context, log_path=tmp_path / "openviking.log"
+    )
+    assert returned is process
+    assert lifecycle == ["remove", "start", "prepare"]
+
+    run_benchmark._stop_openviking_runtime(context, process)
+    assert lifecycle == ["remove", "start", "prepare", "remove"]
+    assert process.stopped is True
+
+
+def test_failed_start_compatibility_scaffolding_is_not_provider_data(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "viking" / "default" / "user" / "default" / "sessions").mkdir(
+        parents=True
+    )
+    assert run_benchmark._openviking_workspace_has_provider_data(workspace) is False
+
+    data = workspace / "viking" / "default" / "engine.db"
+    data.write_bytes(b"provider state")
+    assert run_benchmark._openviking_workspace_has_provider_data(workspace) is True
 
 
 def test_model_manifest_is_selective_and_redacted() -> None:

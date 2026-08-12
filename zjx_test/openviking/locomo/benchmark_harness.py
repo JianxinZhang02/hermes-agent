@@ -447,6 +447,35 @@ def ensure_openviking_session_layout_compatibility(
     }
 
 
+def remove_openviking_session_layout_compatibility(
+    workspace: Path,
+    *,
+    account: str = "default",
+) -> bool:
+    """Remove only the benchmark-created legacy session symlink.
+
+    A fresh OpenViking/AGFS mount owns ``/default/session`` during startup and
+    refuses to mount when the compatibility link already occupies that path.
+    The link is therefore present only while the benchmark scripts inspect
+    archive markers, never while OpenViking starts or stops.
+    """
+
+    cleaned = account.strip()
+    if not cleaned or cleaned in {".", ".."} or Path(cleaned).name != cleaned:
+        raise HarnessError(
+            f"Unsafe OpenViking account for workspace layout: {account!r}"
+        )
+    legacy = workspace.resolve() / "viking" / cleaned / "session"
+    if legacy.is_symlink():
+        legacy.unlink()
+        return True
+    if legacy.exists():
+        raise HarnessError(
+            f"OpenViking legacy session path exists but is not the benchmark symlink: {legacy}"
+        )
+    return False
+
+
 def safe_model_config(config: Mapping[str, Any]) -> dict[str, Any]:
     found: dict[str, Any] = {}
 
