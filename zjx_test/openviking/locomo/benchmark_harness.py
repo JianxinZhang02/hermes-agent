@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import signal
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -72,7 +73,14 @@ MODEL_FIELD_NAMES = {
     "temperature",
     "reasoning_effort",
 }
-SECRET_NAME_PARTS = ("token", "secret", "password", "api_key", "apikey", "authorization")
+SECRET_NAME_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "apikey",
+    "authorization",
+)
 
 
 class HarnessError(RuntimeError):
@@ -104,7 +112,9 @@ def verify_vendor_files(
 ) -> dict[str, str]:
     specifications = load_source_manifest(manifest_path)["openviking_benchmarks"]
     if version not in specifications:
-        raise HarnessError(f"No pinned OpenViking benchmark scripts for version {version}")
+        raise HarnessError(
+            f"No pinned OpenViking benchmark scripts for version {version}"
+        )
     expected = specifications[version]["files"]
     vendor_dir = vendor_dir or VENDOR_ROOT / f"openviking-v{version}"
     actual: dict[str, str] = {}
@@ -161,7 +171,9 @@ def _command_in_current_environment(name: str) -> Path:
     # the Python symlink makes two commands from the same venv look unrelated.
     command = Path(os.path.abspath(resolved))
     active_python = current_python_command()
-    if os.path.normcase(str(command.parent)) != os.path.normcase(str(active_python.parent)):
+    if os.path.normcase(str(command.parent)) != os.path.normcase(
+        str(active_python.parent)
+    ):
         raise HarnessError(
             f"{name} resolves outside the active Python environment:\n"
             f"  python:  {sys.executable}\n  {name}: {command}"
@@ -187,7 +199,9 @@ def validate_editable_hermes(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     return origins
 
 
-def validate_openviking_install(*, allow_version_mismatch: bool = False) -> dict[str, Any]:
+def validate_openviking_install(
+    *, allow_version_mismatch: bool = False
+) -> dict[str, Any]:
     command = _command_in_current_environment("openviking-server")
     try:
         version = importlib.metadata.version("openviking")
@@ -221,7 +235,9 @@ def vendor_dir_for_version(version: str) -> Path:
 def require_bash() -> str:
     command = shutil.which("bash")
     if not command:
-        raise HarnessError("bash is required to run the unmodified official run_full_eval.sh")
+        raise HarnessError(
+            "bash is required to run the unmodified official run_full_eval.sh"
+        )
     return str(Path(command).resolve())
 
 
@@ -340,7 +356,9 @@ def assert_config_parity(native: Mapping[str, Any], e2e: Mapping[str, Any]) -> N
         )
 
 
-def create_openviking_config(source: Path, destination: Path, workspace: Path) -> dict[str, Any]:
+def create_openviking_config(
+    source: Path, destination: Path, workspace: Path
+) -> dict[str, Any]:
     if destination.exists():
         with destination.open("r", encoding="utf-8-sig") as handle:
             existing = json.load(handle)
@@ -389,7 +407,9 @@ def ensure_openviking_session_layout_compatibility(
     def validate_component(value: str, label: str) -> str:
         cleaned = value.strip()
         if not cleaned or cleaned in {".", ".."} or Path(cleaned).name != cleaned:
-            raise HarnessError(f"Unsafe OpenViking {label} for workspace layout: {value!r}")
+            raise HarnessError(
+                f"Unsafe OpenViking {label} for workspace layout: {value!r}"
+            )
         return cleaned
 
     account = validate_component(account, "account")
@@ -613,7 +633,9 @@ def http_json(
     request_headers = {"Accept": "application/json", **dict(headers or {})}
     if data is not None:
         request_headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, method=method, headers=request_headers)
+    request = urllib.request.Request(
+        url, data=data, method=method, headers=request_headers
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
@@ -641,7 +663,9 @@ def wait_for_health(
         except HarnessError as exc:
             last_error = str(exc)
         time.sleep(interval)
-    raise HarnessError(f"Timed out waiting for {url}: {last_error}; log={process.log_path}")
+    raise HarnessError(
+        f"Timed out waiting for {url}: {last_error}; log={process.log_path}"
+    )
 
 
 def start_gateway(
@@ -711,7 +735,9 @@ def probe_hermes_model(base_url: str, token: str, *, session_prefix: str) -> str
         timeout=300,
     )
     if not isinstance(body, dict) or not body.get("id"):
-        raise HarnessError(f"Hermes model preflight returned an invalid response: {body!r}")
+        raise HarnessError(
+            f"Hermes model preflight returned an invalid response: {body!r}"
+        )
     return session_id
 
 
@@ -800,7 +826,9 @@ def probe_judge(env: Mapping[str, str]) -> None:
         if not value
     ]
     if missing:
-        raise HarnessError("Missing independent judge configuration: " + ", ".join(missing))
+        raise HarnessError(
+            "Missing independent judge configuration: " + ", ".join(missing)
+        )
     response = OpenAI(base_url=base_url, api_key=token).chat.completions.create(
         model=model,
         messages=[
@@ -878,6 +906,153 @@ def run_official_suite(
         )
 
 
+def run_logged_command(
+    command: list[str],
+    *,
+    env: Mapping[str, str],
+    log_path: Path,
+    cwd: Path,
+    label: str,
+) -> None:
+    """Run one pinned benchmark stage while teeing output to its durable log."""
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", buffering=1) as log:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=dict(env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            log.write(line)
+        code = process.wait()
+    if code != 0:
+        raise HarnessError(f"{label} failed with status {code}; log={log_path}")
+
+
+def sqlite_session_fingerprint(path: Path) -> dict[str, Any]:
+    """Fingerprint durable Hermes conversation rows without hashing SQLite internals."""
+
+    if not path.is_file():
+        raise HarnessError(f"Hermes state database is missing: {path}")
+    digest = hashlib.sha256()
+    with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as connection:
+        session_count = int(
+            connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        )
+        message_count = int(
+            connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        )
+        for row in connection.execute(
+            "SELECT id, source, COALESCE(session_key, ''), message_count "
+            "FROM sessions ORDER BY id"
+        ):
+            digest.update(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+            digest.update(b"\n")
+        for row in connection.execute(
+            "SELECT session_id, role, COALESCE(content, ''), COALESCE(tool_name, ''), active "
+            "FROM messages ORDER BY id"
+        ):
+            digest.update(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+            digest.update(b"\n")
+    return {
+        "session_count": session_count,
+        "message_count": message_count,
+        "content_sha256": digest.hexdigest(),
+    }
+
+
+def openviking_memory_fingerprint(workspace: Path) -> dict[str, Any]:
+    """Fingerprint extracted OpenViking memory and committed import sessions.
+
+    Observer counters, indexes, caches and logs are deliberately excluded: reads may
+    update those files even when no long-term memory is written.
+    """
+
+    workspace = workspace.resolve()
+    if not workspace.is_dir():
+        raise HarnessError(f"OpenViking workspace is missing: {workspace}")
+    memory_files = sorted(
+        path
+        for path in workspace.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() == ".md"
+        and "memories" in path.relative_to(workspace).parts
+    )
+    digest = hashlib.sha256()
+    for path in memory_files:
+        relative = path.relative_to(workspace).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sha256_file(path).encode("ascii"))
+        digest.update(b"\n")
+
+    canonical_sessions = workspace.glob("viking/*/user/*/sessions/*")
+    session_dirs = sorted(path for path in canonical_sessions if path.is_dir())
+    done_markers = sorted(
+        marker
+        for session_dir in session_dirs
+        for marker in session_dir.rglob(".done")
+        if marker.is_file()
+    )
+    return {
+        "memory_file_count": len(memory_files),
+        "memory_content_sha256": digest.hexdigest(),
+        "committed_session_count": len(session_dirs),
+        "done_marker_count": len(done_markers),
+    }
+
+
+def assert_baseline_unchanged(
+    label: str, before: Mapping[str, Any], after: Mapping[str, Any]
+) -> None:
+    if dict(before) != dict(after):
+        raise HarnessError(
+            f"Read-only QA mutated the {label} baseline.\n"
+            f"Before: {dict(before)}\nAfter: {dict(after)}"
+        )
+
+
+def assert_question_alignment(native_csv: Path, e2e_csv: Path) -> dict[str, Any]:
+    """Verify that two unjudged or judged QA files contain the same questions."""
+
+    native = load_qa(native_csv)
+    e2e = load_qa(e2e_csv)
+    if set(native) != set(e2e):
+        raise HarnessError(
+            "Native and e2e evaluated different question keys: "
+            f"native_only={sorted(set(native) - set(e2e))[:10]}, "
+            f"e2e_only={sorted(set(e2e) - set(native))[:10]}"
+        )
+    digest = hashlib.sha256()
+    for key in sorted(native):
+        for field in ("question", "expected", "category"):
+            if native[key].get(field) != e2e[key].get(field):
+                raise HarnessError(
+                    f"Question alignment mismatch for {key}, field={field}"
+                )
+        digest.update(
+            json.dumps(
+                [
+                    key,
+                    native[key].get("question"),
+                    native[key].get("expected"),
+                    native[key].get("category"),
+                ],
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return {"question_count": len(native), "question_set_sha256": digest.hexdigest()}
+
+
 def _number(row: Mapping[str, str], key: str) -> float:
     try:
         return float(row.get(key, "") or 0)
@@ -896,7 +1071,9 @@ def load_qa(path: Path) -> dict[tuple[str, str], dict[str, str]]:
             continue
         key = (row.get("sample_id", ""), row.get("qi", ""))
         if not all(key):
-            raise HarnessError(f"QA row has no stable sample_id/qi key in {path}: {row}")
+            raise HarnessError(
+                f"QA row has no stable sample_id/qi key in {path}: {row}"
+            )
         result[key] = row
     return result
 
@@ -920,19 +1097,12 @@ def summarize_rows(rows: Iterable[Mapping[str, str]]) -> dict[str, Any]:
     }
 
 
-def compare_results(native_csv: Path, e2e_csv: Path, output_dir: Path) -> dict[str, Any]:
+def compare_results(
+    native_csv: Path, e2e_csv: Path, output_dir: Path
+) -> dict[str, Any]:
     native = load_qa(native_csv)
     e2e = load_qa(e2e_csv)
-    if set(native) != set(e2e):
-        raise HarnessError(
-            "Native and e2e evaluated different question keys: "
-            f"native_only={sorted(set(native) - set(e2e))[:10]}, "
-            f"e2e_only={sorted(set(e2e) - set(native))[:10]}"
-        )
-    for key in native:
-        for field in ("question", "expected", "category"):
-            if native[key].get(field) != e2e[key].get(field):
-                raise HarnessError(f"Question alignment mismatch for {key}, field={field}")
+    assert_question_alignment(native_csv, e2e_csv)
 
     summaries = {
         "native": summarize_rows(native.values()),
@@ -1002,7 +1172,9 @@ def immutable_run_parameters(
     }
 
 
-def assert_resume_parameters(manifest_path: Path, parameters: Mapping[str, Any]) -> None:
+def assert_resume_parameters(
+    manifest_path: Path, parameters: Mapping[str, Any]
+) -> None:
     if not manifest_path.exists():
         return
     with manifest_path.open("r", encoding="utf-8") as handle:

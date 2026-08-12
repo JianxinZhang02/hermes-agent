@@ -72,7 +72,7 @@ The runner copies it into the external run directory, changes only
 `storage.workspace`, and starts a dedicated service on `127.0.0.1:1934`.
 It never touches the existing service or data on port 1933.
 
-## Run
+## Recommended three-stage run
 
 Download and verify LoCoMo:
 
@@ -87,34 +87,83 @@ dedicated OpenViking server, and Hermes OpenViking provider:
 python zjx_test/openviking/locomo/run_benchmark.py preflight
 ```
 
-Run a low-cost aligned experiment first:
+Build all 10 LoCoMo conversations exactly once with one command. Each conv gets
+its own physical Native `state.db` and OpenViking workspace, so memories cannot
+leak between dataset samples. This command deliberately has no `--count`
+argument: the number of later questions is not part of the Memory Baseline.
 
 ```bash
-python zjx_test/openviking/locomo/run_benchmark.py pair \
-  --sample 0 \
-  --count 5
+python zjx_test/openviking/locomo/run_benchmark.py build \
+  --run-id locomo10-memory-v1 \
+  --import-parallel 1
 ```
 
-Then run one complete LoCoMo conversation or the full dataset:
+The completed `memory_build_collection_manifest.json` references 10 child
+`memory_build_manifest.json` files. Every child fingerprints both durable arms:
+
+- native: the imported Hermes `state.db` session/message content;
+- e2e: OpenViking extracted Markdown memory plus committed import sessions.
+
+Re-running the same `build` command validates and reuses all completed
+baselines; it does not replay their historical conversations. If an interrupted
+collection has only built some convs, the next run reuses completed children
+and continues the remaining convs. Use a new build run id when changing the
+dataset, answer model, OpenViking/VLM/embedding configuration, or provider
+version.
+
+Run 1, 10, or all scored QA questions per conv against the same 10 baselines.
+Give each question selection its own `qa-id`:
 
 ```bash
-python zjx_test/openviking/locomo/run_benchmark.py pair --sample 0
-python zjx_test/openviking/locomo/run_benchmark.py pair
+python zjx_test/openviking/locomo/run_benchmark.py qa \
+  --run-id locomo10-memory-v1 --qa-id q1-per-conv --count 1
+
+python zjx_test/openviking/locomo/run_benchmark.py qa \
+  --run-id locomo10-memory-v1 --qa-id q10-per-conv --count 10
+
+python zjx_test/openviking/locomo/run_benchmark.py qa \
+  --run-id locomo10-memory-v1 --qa-id qall
 ```
 
-The command prints a run id. Resume an interrupted run without changing its
-sample, count, model, judge, or concurrency settings:
+Because `--count` follows the official evaluator's per-sample semantics, these
+commands evaluate up to 10 questions (`1 × 10 convs`), up to 100 questions
+(`10 × 10 convs`), and all 1,540 scored Category 1–4 questions respectively.
+
+QA starts Hermes (and OpenViking for the e2e arm), but never runs the import
+scripts. Every question uses an independent session and the official
+`store:false` request. After both arms finish, the runner verifies that the
+saved Memory Baseline fingerprints are unchanged.
+
+Judge any saved QA set as a separate final stage:
 
 ```bash
-python zjx_test/openviking/locomo/run_benchmark.py pair \
-  --run-id locomo-pair-YYYYMMDD-HHMMSS-abcdef \
-  --sample 0 \
-  --count 5
+python zjx_test/openviking/locomo/run_benchmark.py judge \
+  --run-id locomo10-memory-v1 --qa-id q10-per-conv
 ```
 
-Do not use `--force-ingest` against a non-empty e2e workspace. Deterministic
-official Session IDs could reuse old extracted memory, so the runner refuses
-that combination. Use a new run id for a fresh strict run.
+Judge reads only the saved question, prediction, reference answer and official
+judge rule. It does not start Hermes Gateway or OpenViking Server. The same
+Memory Baseline can therefore support any number of independent QA/Judge runs.
+
+For a cheap single-conv debugging build, add `--sample`:
+
+```bash
+python zjx_test/openviking/locomo/run_benchmark.py build \
+  --run-id conv26-memory-debug --sample 0 --import-parallel 1
+```
+
+The corresponding `qa` and `judge` commands automatically recognize that this
+run contains only one conv. You never need to invoke ten single-conv commands
+manually for the full dataset.
+
+For compatibility, the original one-command workflow remains available:
+
+```bash
+python zjx_test/openviking/locomo/run_benchmark.py pair --sample 0 --count 5
+```
+
+`pair` is the legacy all-in-one official flow and keeps its original resume
+semantics. Use `build` + `qa` + `judge` when memory must be built once and reused.
 
 ## Output
 
@@ -123,20 +172,27 @@ runtime state and results default to the repository's sibling directory:
 
 ```text
 /dfs/data/zjx/hermes-locomo-runs/<run-id>/
-├── native/hermes-home/
-├── native/results/
-├── e2e/hermes-home/
-├── e2e/openviking-workspace/
-├── e2e/results/
-└── comparison/
-    ├── run_manifest.json
-    ├── accuracy_comparison.csv
-    └── summary.md
+├── memory_build_collection_manifest.json
+├── conv-builds/
+│   ├── sample-0/
+│   │   ├── memory_build_manifest.json
+│   │   ├── native/hermes-home/state.db
+│   │   └── e2e/openviking-workspace/
+│   ├── sample-1/
+│   └── ... sample-9/
+└── evaluations/<qa-id>/
+    ├── qa_manifest.json
+    ├── judge_manifest.json
+    ├── native/qa_results.csv
+    ├── e2e/qa_results.csv
+    └── comparison/
+        ├── accuracy_comparison.csv
+        └── summary.md
 ```
 
-`run_manifest.json` records source revisions, hashes, model identifiers,
-parallelism and paths. Tokens and API keys are redacted. Before producing the
-comparison, the runner requires both arms to contain exactly the same
+The three manifests record source revisions, hashes, model identifiers,
+question selection and stage status. Tokens and API keys are redacted. Before
+Judge, the runner requires both arms to contain exactly the same
 `sample_id + question index`, question, gold answer and category.
 
 ## Offline tests
@@ -146,4 +202,5 @@ scripts/run_tests.sh zjx_test/openviking/locomo/tests
 ```
 
 These tests do not call any external model or service. The real-service checks
-are intentionally kept in the explicit `preflight` and `pair` commands.
+are intentionally kept in the explicit `preflight`, `build`, `qa`, `judge`,
+and compatibility `pair` commands.

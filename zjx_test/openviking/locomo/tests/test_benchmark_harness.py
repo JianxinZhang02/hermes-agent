@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import shutil
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +15,7 @@ import benchmark_harness
 import run_benchmark
 from benchmark_harness import (
     HarnessError,
+    assert_baseline_unchanged,
     assert_config_parity,
     assert_resume_parameters,
     benchmark_command,
@@ -22,8 +25,10 @@ from benchmark_harness import (
     ensure_openviking_session_layout_compatibility,
     isolated_config,
     materialize_hermes_homes,
+    openviking_memory_fingerprint,
     redact,
     safe_model_config,
+    sqlite_session_fingerprint,
     validate_openviking_install,
     verify_vendor_files,
 )
@@ -39,11 +44,7 @@ def test_vendor_integrity_contract_detects_tampering(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
-            {
-                "openviking_benchmarks": {
-                    "0.3.22": {"files": {"artifact.bin": digest}}
-                }
-            }
+            {"openviking_benchmarks": {"0.3.22": {"files": {"artifact.bin": digest}}}}
         ),
         encoding="utf-8",
     )
@@ -194,7 +195,9 @@ def test_isolated_configs_differ_only_by_provider() -> None:
         assert_config_parity(native, e2e)
 
 
-def test_materialize_homes_does_not_copy_existing_memory_or_state(tmp_path: Path) -> None:
+def test_materialize_homes_does_not_copy_existing_memory_or_state(
+    tmp_path: Path,
+) -> None:
     base_home = tmp_path / "base"
     base_home.mkdir()
     (base_home / "config.yaml").write_text(
@@ -220,7 +223,9 @@ def test_openviking_runtime_config_uses_isolated_workspace(tmp_path: Path) -> No
     source.write_text(
         json.dumps(
             {
-                "embedding": {"dense": {"model": "embedding-model", "api_key": "secret"}},
+                "embedding": {
+                    "dense": {"model": "embedding-model", "api_key": "secret"}
+                },
                 "vlm": {"model": "vlm-model", "api_key": "secret"},
                 "storage": {"workspace": "/old/workspace"},
             }
@@ -409,7 +414,269 @@ def test_child_environment_points_at_isolated_home(tmp_path: Path) -> None:
 def test_resume_rejects_parameter_drift(tmp_path: Path) -> None:
     manifest = tmp_path / "comparison" / "run_manifest.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"parameters": {"sample": 0, "count": 5}}), encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"parameters": {"sample": 0, "count": 5}}), encoding="utf-8"
+    )
     assert_resume_parameters(manifest, {"sample": 0, "count": 5})
     with pytest.raises(HarnessError, match="different immutable parameters"):
         assert_resume_parameters(manifest, {"sample": 1, "count": 5})
+
+
+def test_sqlite_session_fingerprint_tracks_durable_conversation_rows(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                session_key TEXT,
+                message_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_name TEXT,
+                active INTEGER DEFAULT 1
+            );
+            INSERT INTO sessions VALUES ('s1', 'api', 'key-1', 1);
+            INSERT INTO messages VALUES (1, 's1', 'user', 'remember MySQL', NULL, 1);
+            """
+        )
+    before = sqlite_session_fingerprint(database)
+    assert before["session_count"] == 1
+    assert before["message_count"] == 1
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO messages VALUES (2, 's1', 'assistant', 'OK', NULL, 1)"
+        )
+    after = sqlite_session_fingerprint(database)
+    assert after["content_sha256"] != before["content_sha256"]
+
+
+def test_openviking_fingerprint_ignores_read_counters_but_tracks_memory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    memory = (
+        workspace
+        / "viking"
+        / "default"
+        / "user"
+        / "default"
+        / "memories"
+        / "profile.md"
+    )
+    session = workspace / "viking" / "default" / "user" / "default" / "sessions" / "s1"
+    memory.parent.mkdir(parents=True)
+    session.mkdir(parents=True)
+    memory.write_text("database: MySQL", encoding="utf-8")
+    (session / ".done").write_text("", encoding="utf-8")
+    observer = workspace / "observer.json"
+    observer.write_text('{"reads": 1}', encoding="utf-8")
+
+    before = openviking_memory_fingerprint(workspace)
+    observer.write_text('{"reads": 2}', encoding="utf-8")
+    assert openviking_memory_fingerprint(workspace) == before
+
+    memory.write_text("database: PostgreSQL", encoding="utf-8")
+    after = openviking_memory_fingerprint(workspace)
+    assert after["memory_content_sha256"] != before["memory_content_sha256"]
+
+
+def test_read_only_baseline_contract_reports_mutation() -> None:
+    baseline = {"memory_file_count": 2, "memory_content_sha256": "abc"}
+    assert_baseline_unchanged("memory", baseline, dict(baseline))
+    with pytest.raises(HarnessError, match="Read-only QA mutated"):
+        assert_baseline_unchanged(
+            "memory", baseline, {"memory_file_count": 3, "memory_content_sha256": "def"}
+        )
+
+
+def test_staged_cli_keeps_qa_count_out_of_memory_build_identity() -> None:
+    parser = run_benchmark.build_parser()
+    full_build = parser.parse_args(["build", "--run-id", "baseline-all"])
+    build = parser.parse_args(["build", "--sample", "0", "--run-id", "baseline-1"])
+    one = parser.parse_args(
+        ["qa", "--run-id", "baseline-1", "--qa-id", "one-question", "--count", "1"]
+    )
+    ten = parser.parse_args(
+        ["qa", "--run-id", "baseline-1", "--qa-id", "ten-questions", "--count", "10"]
+    )
+    all_questions = parser.parse_args(
+        ["qa", "--run-id", "baseline-1", "--qa-id", "all-questions"]
+    )
+
+    assert full_build.sample is None
+    assert build.sample == 0
+    assert not hasattr(full_build, "count")
+    assert not hasattr(build, "count")
+    assert one.count == 1
+    assert ten.count == 10
+    assert all_questions.count is None
+
+
+def test_collection_child_paths_physically_isolate_each_conv(tmp_path: Path) -> None:
+    parent = run_benchmark.RunPaths.create(tmp_path, "locomo10")
+    first = run_benchmark._collection_child_paths(parent, 0)
+    second = run_benchmark._collection_child_paths(parent, 1)
+
+    assert first.root == parent.root / "conv-builds" / "sample-0"
+    assert second.root == parent.root / "conv-builds" / "sample-1"
+    assert first.native_home != second.native_home
+    assert first.openviking_workspace != second.openviking_workspace
+
+
+def test_collection_csv_aggregation_preserves_all_conv_rows(tmp_path: Path) -> None:
+    first = tmp_path / "sample-0.csv"
+    second = tmp_path / "sample-1.csv"
+    output = tmp_path / "all.csv"
+    first.write_text("sample_id,qi,answer\nconv-1,0,A\n", encoding="utf-8")
+    second.write_text("sample_id,qi,answer\nconv-2,0,B\n", encoding="utf-8")
+
+    run_benchmark._append_csv_files([first, second], output)
+
+    with output.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(row["sample_id"], row["answer"]) for row in rows] == [
+        ("conv-1", "A"),
+        ("conv-2", "B"),
+    ]
+
+
+def test_full_build_command_orchestrates_every_conv_without_manual_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "locomo10.json"
+    dataset.write_text(
+        json.dumps(
+            [
+                {
+                    "sample_id": f"conv-{index}",
+                    "conversation": {"session_1": []},
+                }
+                for index in range(3)
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_benchmark,
+        "verify_dataset",
+        lambda path: {
+            "path": str(dataset),
+            "size": dataset.stat().st_size,
+            "sha256": "data",
+        },
+    )
+    built_samples: list[int] = []
+
+    def fake_single_build(child_args: SimpleNamespace) -> int:
+        built_samples.append(child_args.sample)
+        child_paths = run_benchmark.RunPaths.create(
+            child_args.run_root, child_args.run_id
+        )
+        child_paths.build_manifest.parent.mkdir(parents=True, exist_ok=True)
+        child_paths.build_manifest.write_text(
+            json.dumps({"status": "passed"}), encoding="utf-8"
+        )
+        return 0
+
+    monkeypatch.setattr(run_benchmark, "run_build", fake_single_build)
+    args = SimpleNamespace(
+        run_id="all-convs",
+        run_root=tmp_path / "runs",
+        dataset=dataset,
+        import_parallel=1,
+    )
+
+    assert run_benchmark._run_collection_build(args) == 0
+    assert built_samples == [0, 1, 2]
+    collection = json.loads(
+        run_benchmark.RunPaths.create(
+            args.run_root, args.run_id
+        ).build_collection_manifest.read_text(encoding="utf-8")
+    )
+    assert collection["status"] == "passed"
+    assert [child["sample_id"] for child in collection["children"]] == [
+        "conv-0",
+        "conv-1",
+        "conv-2",
+    ]
+
+
+def test_memory_build_manifest_requires_complete_session_coverage(
+    tmp_path: Path,
+) -> None:
+    paths = run_benchmark.RunPaths.create(tmp_path, "build-1")
+    paths.native_home.mkdir(parents=True)
+    database = paths.native_home / "state.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT NOT NULL,
+                session_key TEXT, message_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                role TEXT NOT NULL, content TEXT, tool_name TEXT,
+                active INTEGER DEFAULT 1
+            );
+            INSERT INTO sessions VALUES ('locomo-native-conv-1-session_1', 'api', '', 1);
+            INSERT INTO messages VALUES (1, 'locomo-native-conv-1-session_1', 'user', 'history', NULL, 1);
+            """
+        )
+    paths.e2e_home.mkdir(parents=True)
+    shutil.copy2(database, paths.e2e_home / "state.db")
+
+    native_csv = paths.native_results / "build" / "import_success.csv"
+    native_csv.parent.mkdir(parents=True)
+    native_csv.write_text(
+        "sample_id,request_count,status\nconv-1,2,success\n", encoding="utf-8"
+    )
+    e2e_csv = paths.e2e_results / "build" / "import_success.csv"
+    e2e_csv.parent.mkdir(parents=True)
+    e2e_csv.write_text(
+        "sample_id,session,status\nconv-1,session_1,success\nconv-1,session_2,success\n",
+        encoding="utf-8",
+    )
+    memory = (
+        paths.openviking_workspace
+        / "viking"
+        / "default"
+        / "user"
+        / "default"
+        / "memories"
+        / "profile.md"
+    )
+    memory.parent.mkdir(parents=True)
+    memory.write_text("remembered", encoding="utf-8")
+    for session_id in ("s1", "s2"):
+        session = (
+            paths.openviking_workspace
+            / "viking"
+            / "default"
+            / "user"
+            / "default"
+            / "sessions"
+            / session_id
+        )
+        session.mkdir(parents=True)
+        (session / ".done").touch()
+
+    sample = {"sample_id": "conv-1", "expected_sessions": 2}
+    artifacts = run_benchmark._validate_build_outputs(paths, sample)
+    assert artifacts["native"]["successful_sessions"] == 2
+    assert artifacts["e2e"]["successful_sessions"] == 2
+
+    e2e_csv.write_text(
+        "sample_id,session,status\nconv-1,session_1,success\n", encoding="utf-8"
+    )
+    with pytest.raises(HarnessError, match="session coverage mismatch"):
+        run_benchmark._validate_build_outputs(paths, sample)
