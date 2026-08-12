@@ -27,6 +27,8 @@ from benchmark_harness import (
     isolated_config,
     materialize_hermes_homes,
     openviking_memory_fingerprint,
+    openviking_token_delta,
+    parse_openviking_model_totals,
     remove_openviking_session_layout_compatibility,
     redact,
     safe_model_config,
@@ -371,6 +373,7 @@ def test_model_manifest_is_selective_and_redacted() -> None:
     }
     assert redact(config)["api_key"] == "<redacted>"
     assert redact(config)["nested"]["password"] == "<redacted>"
+    assert redact({"input_tokens": 123})["input_tokens"] == 123
 
 
 QA_FIELDS = [
@@ -628,6 +631,139 @@ def test_collection_csv_aggregation_preserves_all_conv_rows(tmp_path: Path) -> N
         ("conv-1", "A"),
         ("conv-2", "B"),
     ]
+
+
+def test_openviking_observer_parser_and_delta_separate_model_classes() -> None:
+    status = """
+Embedding Models:
+| Model | Provider | Calls | Prompt | Completion | Errors | Latency |
+| embed-a | openai | 2 | 120 | 0 | 0 | 1.0 |
+VLM Models:
+| Model | Provider | Calls | Prompt | Completion | Errors | Latency |
+| vlm-a | openai | 3 | 900 | 250 | 0 | 2.0 |
+"""
+    final = parse_openviking_model_totals(status)
+    delta = openviking_token_delta(
+        {
+            "embedding_input_tokens": 20,
+            "embedding_output_tokens": 0,
+            "vlm_llm_input_tokens": 100,
+            "vlm_llm_output_tokens": 50,
+        },
+        final,
+    )
+
+    assert delta == {
+        "embedding_input_tokens": 100,
+        "embedding_output_tokens": 0,
+        "vlm_llm_input_tokens": 800,
+        "vlm_llm_output_tokens": 200,
+        "embedding_total_tokens": 100,
+        "vlm_llm_total_tokens": 1000,
+        "all_openviking_model_tokens": 1100,
+    }
+
+
+def test_failed_openviking_stage_still_persists_observed_token_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "openviking_token_usage.json"
+    monkeypatch.setattr(
+        run_benchmark,
+        "read_openviking_model_totals",
+        lambda url: {
+            "embedding_input_tokens": 30,
+            "embedding_output_tokens": 0,
+            "vlm_llm_input_tokens": 500,
+            "vlm_llm_output_tokens": 200,
+        },
+    )
+
+    record = run_benchmark._finalize_openviking_stage_usage(
+        output,
+        base_url="http://127.0.0.1:1934",
+        stage="openviking_memory_build",
+        baseline={
+            "embedding_input_tokens": 10,
+            "embedding_output_tokens": 0,
+            "vlm_llm_input_tokens": 100,
+            "vlm_llm_output_tokens": 50,
+        },
+        status="failed",
+        error="memory extraction failed",
+    )
+
+    assert record["status"] == "failed"
+    assert record["stage_error"] == "memory extraction failed"
+    assert record["delta"]["all_openviking_model_tokens"] == 570
+    assert json.loads(output.read_text(encoding="utf-8"))["available"] is True
+
+
+def test_build_token_report_can_use_pinned_vendor_legacy_snapshot(
+    tmp_path: Path,
+) -> None:
+    paths = run_benchmark.RunPaths.create(tmp_path, "legacy-run")
+    native = paths.native_results / "build" / "import_success.csv"
+    e2e = paths.e2e_results / "build" / "import_success.csv"
+    native.parent.mkdir(parents=True)
+    e2e.parent.mkdir(parents=True)
+    native.write_text(
+        "input_tokens,output_tokens,cache_read,cache_write,total_tokens\n100,10,0,0,110\n",
+        encoding="utf-8",
+    )
+    e2e.write_text(
+        "input_tokens,output_tokens,cache_read,cache_write,total_tokens\n200,20,0,0,220\n",
+        encoding="utf-8",
+    )
+    (e2e.parent / "import_true_tokens.csv").write_text(
+        "timestamp,embedding_input_tokens,embedding_output_tokens,vlm_llm_input_tokens,vlm_llm_output_tokens\n"
+        "now,30,0,400,50\n",
+        encoding="utf-8",
+    )
+
+    report = run_benchmark._write_build_token_report(paths, status="passed")
+
+    assert report["totals"] == {
+        "hermes_model_tokens": 330,
+        "openviking_model_tokens": 480,
+        "observed_model_tokens": 810,
+    }
+    assert (paths.root / "token_usage.md").is_file()
+
+
+def test_tokens_command_reports_partial_failed_collection(tmp_path: Path) -> None:
+    run_root = tmp_path / "runs"
+    paths = run_benchmark.RunPaths.create(run_root, "failed-collection")
+    paths.root.mkdir(parents=True)
+    paths.build_collection_manifest.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "parameters": {"sample_count": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    child = run_benchmark._collection_child_paths(paths, 0)
+    child.build_manifest.parent.mkdir(parents=True)
+    child.build_manifest.write_text(json.dumps({"status": "failed"}), encoding="utf-8")
+    native = child.native_results / "build" / "import_success.csv"
+    native.parent.mkdir(parents=True)
+    native.write_text(
+        "input_tokens,output_tokens,cache_read,cache_write,total_tokens\n100,10,0,0,110\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        run_benchmark.run_tokens(
+            SimpleNamespace(run_id="failed-collection", run_root=run_root, qa_id=None)
+        )
+        == 0
+    )
+    report = json.loads((paths.root / "token_usage.json").read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["totals"]["hermes_model_tokens"] == 110
+    assert "Captured 1/2" in report["notes"][0]
 
 
 def test_full_build_command_orchestrates_every_conv_without_manual_invocation(

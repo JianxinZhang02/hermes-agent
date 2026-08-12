@@ -145,6 +145,24 @@ Judge reads only the saved question, prediction, reference answer and official
 judge rule. It does not start Hermes Gateway or OpenViking Server. The same
 Memory Baseline can therefore support any number of independent QA/Judge runs.
 
+Inspect model-token usage at any time, including a failed or interrupted build:
+
+```bash
+python zjx_test/openviking/locomo/run_benchmark.py tokens \
+  --run-id locomo10-memory-v1
+
+python zjx_test/openviking/locomo/run_benchmark.py tokens \
+  --run-id locomo10-memory-v1 --qa-id q10-per-conv
+```
+
+The runner records separate stages for Native Memory Build, OpenViking Memory
+Build, Native QA, and OpenViking QA. OpenViking Observer snapshots separate
+embedding input/output from VLM/LLM input/output. The final snapshot is taken
+in a `finally` path, so a VLM extraction or commit failure still records the
+tokens consumed before failure whenever the server remains reachable. The
+pinned upstream Judge script does not expose response usage, so Judge tokens
+are explicitly reported as unavailable rather than estimated.
+
 For a cheap single-conv debugging build, add `--sample`:
 
 ```bash
@@ -172,6 +190,11 @@ runtime state and results default to the repository's sibling directory:
 
 ```text
 /dfs/data/zjx/hermes-locomo-runs/<run-id>/
+    token_usage.json             # machine-readable, per-stage totals
+    token_usage.md               # human-readable summary
+    evaluations/<qa-id>/
+        token_usage.json
+        token_usage.md
 ├── memory_build_collection_manifest.json
 ├── conv-builds/
 │   ├── sample-0/

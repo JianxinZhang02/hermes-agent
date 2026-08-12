@@ -18,6 +18,7 @@ from benchmark_harness import (
     DATASET_PATH,
     DEFAULT_RUN_ROOT,
     HarnessError,
+    OPENVIKING_TOKEN_FIELDS,
     assert_baseline_unchanged,
     assert_question_alignment,
     assert_resume_parameters,
@@ -55,6 +56,8 @@ from benchmark_harness import (
     verify_dataset,
     verify_vendor_files,
     openviking_memory_fingerprint,
+    openviking_token_delta,
+    read_openviking_model_totals,
 )
 
 
@@ -695,6 +698,390 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _csv_token_usage(path: Path, *, prefix: str = "") -> dict[str, Any]:
+    """Sum Hermes usage columns from an import or QA result CSV."""
+
+    if not path.is_file():
+        return {"available": False, "path": str(path), "rows": 0}
+    rows = _read_csv(path)
+
+    def total(name: str) -> int:
+        key = f"{prefix}{name}"
+        return sum(int(float(row.get(key) or 0)) for row in rows)
+
+    usage = {
+        "available": True,
+        "path": str(path),
+        "rows": len(rows),
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "cache_read_tokens": total("cache_read_tokens")
+        if prefix
+        else total("cache_read"),
+        "cache_write_tokens": total("cache_write_tokens")
+        if prefix
+        else total("cache_write"),
+        "total_tokens": total("total_tokens"),
+    }
+    return usage
+
+
+def _read_openviking_stage_usage(path: Path) -> dict[str, Any]:
+    if path.is_file():
+        value = _load_json(path)
+        value["path"] = str(path)
+        return value
+    for legacy_name in ("import_true_tokens.csv", "eval_true_tokens.csv"):
+        legacy = path.with_name(legacy_name)
+        if not legacy.is_file():
+            continue
+        delta = {field: 0 for field in OPENVIKING_TOKEN_FIELDS}
+        for row in _read_csv(legacy):
+            for field in OPENVIKING_TOKEN_FIELDS:
+                delta[field] += int(row.get(field) or 0)
+        delta["embedding_total_tokens"] = (
+            delta["embedding_input_tokens"] + delta["embedding_output_tokens"]
+        )
+        delta["vlm_llm_total_tokens"] = (
+            delta["vlm_llm_input_tokens"] + delta["vlm_llm_output_tokens"]
+        )
+        delta["all_openviking_model_tokens"] = (
+            delta["embedding_total_tokens"] + delta["vlm_llm_total_tokens"]
+        )
+        return {
+            "available": True,
+            "status": "legacy_success_snapshot",
+            "path": str(legacy),
+            "delta": delta,
+        }
+    return {"available": False, "path": str(path)}
+
+
+def _observer_baseline(base_url: str, *, stage: str) -> dict[str, int] | None:
+    try:
+        return read_openviking_model_totals(base_url)
+    except Exception as exc:
+        print(f"[WARN] {stage}: could not capture OpenViking token baseline: {exc}")
+        return None
+
+
+def _finalize_openviking_stage_usage(
+    path: Path,
+    *,
+    base_url: str,
+    stage: str,
+    baseline: dict[str, int] | None,
+    status: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Persist an Observer delta even when the measured stage failed."""
+
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "stage": stage,
+        "status": status,
+        "captured_at": utc_now(),
+        "available": False,
+    }
+    if error:
+        record["stage_error"] = error
+    try:
+        final = read_openviking_model_totals(base_url)
+        record["baseline"] = baseline
+        record["final"] = final
+        if baseline is None:
+            record["observer_error"] = "baseline snapshot was unavailable"
+        else:
+            record["available"] = True
+            record["delta"] = openviking_token_delta(baseline, final)
+    except Exception as exc:
+        record["baseline"] = baseline
+        record["observer_error"] = str(exc)
+    atomic_json(path, record)
+    if record["available"]:
+        delta = record["delta"]
+        print(
+            f"[TOKEN] {stage}: OpenViking embedding={delta['embedding_total_tokens']:,}, "
+            f"VLM/LLM={delta['vlm_llm_total_tokens']:,}, "
+            f"total={delta['all_openviking_model_tokens']:,} ({status})"
+        )
+    else:
+        print(
+            f"[TOKEN] {stage}: OpenViking usage unavailable ({status}); report={path}"
+        )
+    return record
+
+
+def _write_token_report(
+    path: Path,
+    *,
+    title: str,
+    status: str,
+    stages: list[dict[str, Any]],
+    notes: list[str] | None = None,
+) -> dict[str, Any]:
+    hermes_total = 0
+    openviking_total = 0
+    for stage in stages:
+        hermes = stage.get("hermes", {})
+        if hermes.get("available"):
+            hermes_total += int(hermes.get("total_tokens") or 0)
+        openviking = stage.get("openviking", {})
+        if openviking.get("available"):
+            openviking_total += int(
+                openviking.get("delta", {}).get("all_openviking_model_tokens") or 0
+            )
+    report = {
+        "schema_version": 1,
+        "title": title,
+        "status": status,
+        "generated_at": utc_now(),
+        "stages": stages,
+        "totals": {
+            "hermes_model_tokens": hermes_total,
+            "openviking_model_tokens": openviking_total,
+            "observed_model_tokens": hermes_total + openviking_total,
+        },
+        "notes": notes or [],
+    }
+    atomic_json(path, report)
+
+    lines = [
+        f"# {title}",
+        "",
+        f"Status: `{status}`",
+        "",
+        "| Stage | Hermes input | Hermes output | Hermes total | OV embedding | OV VLM/LLM | Stage status |",
+        "|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for stage in stages:
+        hermes = stage.get("hermes", {})
+        ov = stage.get("openviking", {})
+        delta = ov.get("delta", {}) if ov.get("available") else {}
+        lines.append(
+            "| {name} | {hin} | {hout} | {htotal} | {embedding} | {vlm} | {state} |".format(
+                name=stage["name"],
+                hin=f"{int(hermes.get('input_tokens') or 0):,}"
+                if hermes.get("available")
+                else "N/A",
+                hout=f"{int(hermes.get('output_tokens') or 0):,}"
+                if hermes.get("available")
+                else "N/A",
+                htotal=f"{int(hermes.get('total_tokens') or 0):,}"
+                if hermes.get("available")
+                else "N/A",
+                embedding=f"{int(delta.get('embedding_total_tokens') or 0):,}"
+                if ov.get("available")
+                else "N/A",
+                vlm=f"{int(delta.get('vlm_llm_total_tokens') or 0):,}"
+                if ov.get("available")
+                else "N/A",
+                state=stage.get("status", status),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Totals",
+            "",
+            f"- Hermes model tokens: {hermes_total:,}",
+            f"- OpenViking model tokens: {openviking_total:,}",
+            f"- Observed total: {hermes_total + openviking_total:,}",
+        ]
+    )
+    if notes:
+        lines.extend(["", "## Notes", ""] + [f"- {note}" for note in notes])
+    markdown = path.with_suffix(".md")
+    markdown.parent.mkdir(parents=True, exist_ok=True)
+    markdown.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(
+        f"[TOKEN] {title}: Hermes={hermes_total:,}, OpenViking={openviking_total:,}, "
+        f"observed total={hermes_total + openviking_total:,}"
+    )
+    print(f"[TOKEN] Reports: {path} and {markdown}")
+    return report
+
+
+def _write_build_token_report(paths: RunPaths, *, status: str) -> dict[str, Any]:
+    native_csv = paths.native_results / "build" / "import_success.csv"
+    e2e_csv = paths.e2e_results / "build" / "import_success.csv"
+    openviking_json = e2e_csv.parent / "openviking_token_usage.json"
+    return _write_token_report(
+        paths.root / "token_usage.json",
+        title="LoCoMo Memory Build Token Usage",
+        status=status,
+        stages=[
+            {
+                "name": "native_memory_build",
+                "status": status,
+                "hermes": _csv_token_usage(native_csv),
+            },
+            {
+                "name": "openviking_memory_build",
+                "status": status,
+                "hermes": _csv_token_usage(e2e_csv),
+                "openviking": _read_openviking_stage_usage(openviking_json),
+            },
+        ],
+        notes=[
+            "Judge tokens are not part of the Memory Build stage.",
+            "A failed stage is still measured when the OpenViking Observer remains reachable.",
+        ],
+    )
+
+
+def _write_qa_token_report(outputs: dict[str, Path], *, status: str) -> dict[str, Any]:
+    return _write_token_report(
+        outputs["token_usage"],
+        title="LoCoMo Read-only QA Token Usage",
+        status=status,
+        stages=[
+            {
+                "name": "native_qa",
+                "status": status,
+                "hermes": _csv_token_usage(outputs["native"], prefix="qa_"),
+            },
+            {
+                "name": "openviking_qa",
+                "status": status,
+                "hermes": _csv_token_usage(outputs["e2e"], prefix="qa_"),
+                "openviking": _read_openviking_stage_usage(
+                    outputs["e2e"].parent / "openviking_token_usage.json"
+                ),
+            },
+        ],
+        notes=[
+            "Judge-model tokens are excluded because the pinned upstream judge script does not expose response usage.",
+            "QA reuses the frozen Memory Build; Memory Build tokens are reported separately.",
+        ],
+    )
+
+
+def _append_judge_token_stage(
+    outputs: dict[str, Path], *, status: str, model: str
+) -> dict[str, Any]:
+    if outputs["token_usage"].is_file():
+        existing = _load_json(outputs["token_usage"])
+        stages = [
+            stage
+            for stage in existing.get("stages", [])
+            if stage.get("name") != "judge"
+        ]
+        notes = list(existing.get("notes", []))
+        title = str(existing.get("title") or "LoCoMo Token Usage")
+    else:
+        stages = []
+        notes = []
+        title = "LoCoMo Token Usage"
+    judged_rows = 0
+    for result_path in (outputs["native"], outputs["e2e"]):
+        if result_path.is_file():
+            judged_rows += sum(1 for row in _read_csv(result_path) if row.get("result"))
+    stages.append(
+        {
+            "name": "judge",
+            "status": status,
+            "model": model,
+            "requests_with_saved_result": judged_rows,
+            "token_usage_available": False,
+        }
+    )
+    note = (
+        "Judge calls are counted, but Judge tokens are unavailable because the pinned "
+        "upstream judge script does not expose response usage."
+    )
+    if note not in notes:
+        notes.append(note)
+    return _write_token_report(
+        outputs["token_usage"],
+        title=title,
+        status=status,
+        stages=stages,
+        notes=notes,
+    )
+
+
+def _aggregate_token_reports(
+    source_paths: list[Path],
+    destination: Path,
+    *,
+    title: str,
+    status: str,
+) -> dict[str, Any]:
+    """Aggregate per-conversation reports without double-counting vendor CSVs."""
+
+    reports = [_load_json(path) for path in source_paths if path.is_file()]
+    stages_by_name: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        for stage in report.get("stages", []):
+            name = str(stage.get("name") or "unknown")
+            target = stages_by_name.setdefault(
+                name,
+                {
+                    "name": name,
+                    "status": status,
+                    "hermes": {
+                        "available": False,
+                        "rows": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                    "openviking": {
+                        "available": False,
+                        "delta": {field: 0 for field in OPENVIKING_TOKEN_FIELDS},
+                    },
+                },
+            )
+            hermes = stage.get("hermes", {})
+            if hermes.get("available"):
+                target_hermes = target["hermes"]
+                target_hermes["available"] = True
+                for field in (
+                    "rows",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_write_tokens",
+                    "total_tokens",
+                ):
+                    target_hermes[field] += int(hermes.get(field) or 0)
+            openviking = stage.get("openviking", {})
+            if openviking.get("available"):
+                target_openviking = target["openviking"]
+                target_openviking["available"] = True
+                delta = openviking.get("delta", {})
+                for field in OPENVIKING_TOKEN_FIELDS:
+                    target_openviking["delta"][field] += int(delta.get(field) or 0)
+
+    for stage in stages_by_name.values():
+        ov = stage["openviking"]
+        if ov["available"]:
+            delta = ov["delta"]
+            delta["embedding_total_tokens"] = (
+                delta["embedding_input_tokens"] + delta["embedding_output_tokens"]
+            )
+            delta["vlm_llm_total_tokens"] = (
+                delta["vlm_llm_input_tokens"] + delta["vlm_llm_output_tokens"]
+            )
+            delta["all_openviking_model_tokens"] = (
+                delta["embedding_total_tokens"] + delta["vlm_llm_total_tokens"]
+            )
+
+    return _write_token_report(
+        destination,
+        title=title,
+        status=status,
+        stages=list(stages_by_name.values()),
+        notes=[
+            f"Captured {len(reports)}/{len(source_paths)} per-conversation token reports.",
+            "Totals are partial when the collection status is failed or a child report is missing.",
+        ],
+    )
+
+
 def _validate_build_outputs(paths: RunPaths, sample: dict[str, Any]) -> dict[str, Any]:
     native_csv = paths.native_results / "build" / "import_success.csv"
     e2e_csv = paths.e2e_results / "build" / "import_success.csv"
@@ -939,6 +1326,18 @@ def _run_collection_build(args: argparse.Namespace) -> int:
                 "children": children,
             }
         )
+        child_token_reports = [
+            _collection_child_paths(paths, sample["sample_index"]).root
+            / "token_usage.json"
+            for sample in samples
+        ]
+        _aggregate_token_reports(
+            child_token_reports,
+            paths.root / "token_usage.json",
+            title="Full LoCoMo Memory Build Token Usage",
+            status="passed",
+        )
+        manifest["token_usage"] = str(paths.root / "token_usage.json")
         atomic_json(paths.build_collection_manifest, manifest)
         print(
             f"\nPASS: all {len(samples)} isolated Memory Baselines completed: "
@@ -954,6 +1353,21 @@ def _run_collection_build(args: argparse.Namespace) -> int:
                 "children": children,
             }
         )
+        child_token_reports = [
+            _collection_child_paths(paths, sample["sample_index"]).root
+            / "token_usage.json"
+            for sample in samples
+        ]
+        try:
+            _aggregate_token_reports(
+                child_token_reports,
+                paths.root / "token_usage.json",
+                title="Full LoCoMo Memory Build Token Usage",
+                status="failed",
+            )
+            manifest["token_usage"] = str(paths.root / "token_usage.json")
+        except Exception as report_exc:
+            print(f"[WARN] Could not aggregate failed collection tokens: {report_exc}")
         atomic_json(paths.build_collection_manifest, manifest)
         raise
 
@@ -1036,6 +1450,11 @@ def run_build(args: argparse.Namespace) -> int:
             context,
             log_path=e2e_csv.parent / "logs" / "openviking.log",
         )
+        observer_url = f"http://127.0.0.1:{args.openviking_port}"
+        observer_baseline = _observer_baseline(
+            observer_url, stage="openviking_memory_build"
+        )
+        e2e_stage_error: str | None = None
         try:
             _require_free_port(args.gateway_port, "Hermes gateway")
             api_key = make_api_key()
@@ -1057,7 +1476,11 @@ def run_build(args: argparse.Namespace) -> int:
             try:
                 run_logged_command(
                     _import_command(
-                        args, context, suite="e2e", success_csv=e2e_csv, api_key=api_key
+                        args,
+                        context,
+                        suite="e2e",
+                        success_csv=e2e_csv,
+                        api_key=api_key,
                     ),
                     env=env,
                     log_path=e2e_csv.parent / "logs" / "import.log",
@@ -1066,7 +1489,18 @@ def run_build(args: argparse.Namespace) -> int:
                 )
             finally:
                 gateway.stop()
+        except BaseException as exc:
+            e2e_stage_error = str(exc)
+            raise
         finally:
+            _finalize_openviking_stage_usage(
+                e2e_csv.parent / "openviking_token_usage.json",
+                base_url=observer_url,
+                stage="openviking_memory_build",
+                baseline=observer_baseline,
+                status="failed" if e2e_stage_error else "passed",
+                error=e2e_stage_error,
+            )
             _stop_openviking_runtime(context, openviking)
 
         print("[3/3] Freeze and fingerprint the reusable Memory Baseline")
@@ -1077,12 +1511,17 @@ def run_build(args: argparse.Namespace) -> int:
             completed_at=utc_now(),
             artifacts=artifacts,
         )
+        _write_build_token_report(paths, status="passed")
         print(f"PASS: one-time Memory Build completed: {paths.build_manifest}")
         return 0
     except Exception as exc:
         _update_build_manifest(
             context, status="failed", failed_at=utc_now(), error=str(exc)
         )
+        try:
+            _write_build_token_report(paths, status="failed")
+        except Exception as report_exc:
+            print(f"[WARN] Could not write failed-build token report: {report_exc}")
         raise
 
 
@@ -1157,6 +1596,7 @@ def _evaluation_paths(paths: RunPaths, qa_id: str) -> dict[str, Path]:
         "e2e": root / "e2e" / "qa_results.csv",
         "comparison": root / "comparison",
         "judge_manifest": root / "judge_manifest.json",
+        "token_usage": root / "token_usage.json",
     }
 
 
@@ -1244,6 +1684,9 @@ def _run_e2e_qa(
         context,
         log_path=output.parent / "logs" / "openviking.log",
     )
+    observer_url = f"http://127.0.0.1:{args.openviking_port}"
+    observer_baseline = _observer_baseline(observer_url, stage="openviking_qa")
+    e2e_stage_error: str | None = None
     try:
         _require_free_port(args.gateway_port, "Hermes gateway")
         api_key = make_api_key()
@@ -1274,7 +1717,18 @@ def _run_e2e_qa(
             )
         finally:
             gateway.stop()
+    except BaseException as exc:
+        e2e_stage_error = str(exc)
+        raise
     finally:
+        _finalize_openviking_stage_usage(
+            output.parent / "openviking_token_usage.json",
+            base_url=observer_url,
+            stage="openviking_qa",
+            baseline=observer_baseline,
+            status="failed" if e2e_stage_error else "passed",
+            error=e2e_stage_error,
+        )
         _stop_openviking_runtime(context, openviking)
 
 
@@ -1352,6 +1806,13 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
     print(f"  count per conv:    {args.count if args.count is not None else 'all'}")
     child_native_csvs: list[Path] = []
     child_e2e_csvs: list[Path] = []
+    child_token_reports: list[Path] = []
+    expected_child_token_reports = [
+        _evaluation_paths(
+            _collection_child_paths(paths, int(child["sample_index"])), qa_id
+        )["token_usage"]
+        for child in collection["children"]
+    ]
     try:
         for position, child_record in enumerate(collection["children"], 1):
             sample_index = int(child_record["sample_index"])
@@ -1366,6 +1827,7 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
             child_outputs = _evaluation_paths(child_paths, qa_id)
             child_native_csvs.append(child_outputs["native"])
             child_e2e_csvs.append(child_outputs["e2e"])
+            child_token_reports.append(child_outputs["token_usage"])
             child_qa_manifest = _load_json(child_outputs["manifest"])
             manifest["children"].append(
                 {
@@ -1382,6 +1844,12 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
         _append_csv_files(child_native_csvs, outputs["native"])
         _append_csv_files(child_e2e_csvs, outputs["e2e"])
         alignment = assert_question_alignment(outputs["native"], outputs["e2e"])
+        _aggregate_token_reports(
+            child_token_reports,
+            outputs["token_usage"],
+            title="Full LoCoMo Read-only QA Token Usage",
+            status="passed",
+        )
         manifest.update(
             {
                 "status": "passed",
@@ -1390,6 +1858,7 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
                 "outputs": {
                     "native": str(outputs["native"]),
                     "e2e": str(outputs["e2e"]),
+                    "token_usage": str(outputs["token_usage"]),
                 },
             }
         )
@@ -1402,6 +1871,18 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:
         manifest.update({"status": "failed", "failed_at": utc_now(), "error": str(exc)})
+        try:
+            _aggregate_token_reports(
+                expected_child_token_reports,
+                outputs["token_usage"],
+                title="Full LoCoMo Read-only QA Token Usage",
+                status="failed",
+            )
+            manifest["token_usage"] = str(outputs["token_usage"])
+        except Exception as report_exc:
+            print(
+                f"[WARN] Could not aggregate failed collection QA tokens: {report_exc}"
+            )
         atomic_json(outputs["manifest"], manifest)
         raise
 
@@ -1488,6 +1969,7 @@ def run_qa(args: argparse.Namespace) -> int:
             }
         )
         atomic_json(outputs["manifest"], qa_manifest)
+        _write_qa_token_report(outputs, status="passed")
         print(f"PASS: reusable read-only QA completed: {outputs['manifest']}")
         print(f"Next: run judge with --run-id {context['run_id']} --qa-id {qa_id}")
         return 0
@@ -1496,6 +1978,10 @@ def run_qa(args: argparse.Namespace) -> int:
             {"status": "failed", "failed_at": utc_now(), "error": str(exc)}
         )
         atomic_json(outputs["manifest"], qa_manifest)
+        try:
+            _write_qa_token_report(outputs, status="failed")
+        except Exception as report_exc:
+            print(f"[WARN] Could not write failed-QA token report: {report_exc}")
         raise
 
 
@@ -1598,6 +2084,9 @@ def run_judge(args: argparse.Namespace) -> int:
             {"status": "passed", "completed_at": utc_now(), "comparison": comparison}
         )
         atomic_json(outputs["judge_manifest"], judge_manifest)
+        _append_judge_token_stage(
+            outputs, status="passed", model=context["judge_model"]
+        )
         print(f"PASS: isolated Judge completed: {outputs['comparison'] / 'summary.md'}")
         return 0
     except Exception as exc:
@@ -1605,7 +2094,97 @@ def run_judge(args: argparse.Namespace) -> int:
             {"status": "failed", "failed_at": utc_now(), "error": str(exc)}
         )
         atomic_json(outputs["judge_manifest"], judge_manifest)
+        try:
+            _append_judge_token_stage(
+                outputs, status="failed", model=context["judge_model"]
+            )
+        except Exception as report_exc:
+            print(f"[WARN] Could not update Judge token report: {report_exc}")
         raise
+
+
+def run_tokens(args: argparse.Namespace) -> int:
+    """Rebuild human-readable token reports from an existing run directory."""
+
+    run_id = validate_run_id(args.run_id)
+    paths = RunPaths.create(args.run_root, run_id)
+    if not paths.root.is_dir():
+        raise HarnessError(f"Run directory is missing: {paths.root}")
+
+    if paths.build_collection_manifest.is_file():
+        collection = _load_json(paths.build_collection_manifest)
+        sample_count = int(collection.get("parameters", {}).get("sample_count") or 0)
+        child_dirs = sorted(
+            (paths.root / "conv-builds").glob("sample-*"),
+            key=lambda path: int(path.name.split("-", 1)[1]),
+        )
+        for child_dir in child_dirs:
+            sample_index = int(child_dir.name.split("-", 1)[1])
+            child_paths = _collection_child_paths(paths, sample_index)
+            child_manifest = (
+                _load_json(child_paths.build_manifest)
+                if child_paths.build_manifest.is_file()
+                else {}
+            )
+            _write_build_token_report(
+                child_paths, status=str(child_manifest.get("status") or "partial")
+            )
+        child_reports = [
+            _collection_child_paths(paths, sample_index).root / "token_usage.json"
+            for sample_index in range(sample_count)
+        ]
+        _aggregate_token_reports(
+            child_reports,
+            paths.root / "token_usage.json",
+            title="Full LoCoMo Memory Build Token Usage",
+            status=str(collection.get("status") or "partial"),
+        )
+    elif paths.build_manifest.is_file():
+        build = _load_json(paths.build_manifest)
+        _write_build_token_report(paths, status=str(build.get("status") or "partial"))
+    else:
+        raise HarnessError(
+            f"No Memory Build manifest was found under existing run: {paths.root}"
+        )
+
+    if args.qa_id:
+        outputs = _evaluation_paths(paths, args.qa_id)
+        if paths.build_collection_manifest.is_file():
+            child_qa_reports: list[Path] = []
+            for child_dir in sorted(
+                (paths.root / "conv-builds").glob("sample-*"),
+                key=lambda path: int(path.name.split("-", 1)[1]),
+            ):
+                sample_index = int(child_dir.name.split("-", 1)[1])
+                child_outputs = _evaluation_paths(
+                    _collection_child_paths(paths, sample_index), args.qa_id
+                )
+                if not child_outputs["root"].is_dir():
+                    continue
+                child_manifest = (
+                    _load_json(child_outputs["manifest"])
+                    if child_outputs["manifest"].is_file()
+                    else {}
+                )
+                _write_qa_token_report(
+                    child_outputs,
+                    status=str(child_manifest.get("status") or "partial"),
+                )
+                child_qa_reports.append(child_outputs["token_usage"])
+            _aggregate_token_reports(
+                child_qa_reports,
+                outputs["token_usage"],
+                title="Full LoCoMo Read-only QA Token Usage",
+                status="observed",
+            )
+        else:
+            qa_manifest = (
+                _load_json(outputs["manifest"]) if outputs["manifest"].is_file() else {}
+            )
+            _write_qa_token_report(
+                outputs, status=str(qa_manifest.get("status") or "partial")
+            )
+    return 0
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1709,6 +2288,14 @@ def build_parser() -> argparse.ArgumentParser:
     judge.add_argument("--judge-parallel", type=_positive, default=5)
     judge.add_argument("--judge-error-retries", type=_nonnegative, default=2)
     judge.set_defaults(handler=run_judge)
+
+    tokens = subparsers.add_parser(
+        "tokens", help="Summarize captured build/QA model tokens for an existing run"
+    )
+    tokens.add_argument("--run-root", type=Path, default=DEFAULT_RUN_ROOT)
+    tokens.add_argument("--run-id", required=True)
+    tokens.add_argument("--qa-id", default=None)
+    tokens.set_defaults(handler=run_tokens)
     return parser
 
 

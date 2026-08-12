@@ -81,6 +81,12 @@ SECRET_NAME_PARTS = (
     "apikey",
     "authorization",
 )
+OPENVIKING_TOKEN_FIELDS = (
+    "embedding_input_tokens",
+    "embedding_output_tokens",
+    "vlm_llm_input_tokens",
+    "vlm_llm_output_tokens",
+)
 
 
 class HarnessError(RuntimeError):
@@ -503,9 +509,11 @@ def redact(value: Any) -> Any:
         result = {}
         for key, child in value.items():
             lowered = str(key).lower()
+            sensitive_name = any(part in lowered for part in SECRET_NAME_PARTS)
+            safe_usage_value = isinstance(child, (int, float, bool))
             result[str(key)] = (
                 "<redacted>"
-                if any(part in lowered for part in SECRET_NAME_PARTS)
+                if sensitive_name and not safe_usage_value
                 else redact(child)
             )
         return result
@@ -675,6 +683,70 @@ def http_json(
         raise HarnessError(f"HTTP {exc.code} from {url}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise HarnessError(f"Request failed for {url}: {exc}") from exc
+
+
+def parse_openviking_model_totals(status_text: str) -> dict[str, int]:
+    """Parse the model-usage table returned by OpenViking's observer API."""
+
+    totals = {field: 0 for field in OPENVIKING_TOKEN_FIELDS}
+    current_section = ""
+    for raw_line in status_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.endswith("Models:"):
+            current_section = line.split(" ", 1)[0].lower()
+            continue
+        if not line.startswith("|"):
+            continue
+        columns = [column.strip() for column in line.split("|") if column.strip()]
+        if len(columns) < 7 or columns[0] == "Model":
+            continue
+        prompt = int(columns[3]) if columns[3].isdigit() else 0
+        completion = int(columns[4]) if columns[4].isdigit() else 0
+        if current_section == "embedding":
+            totals["embedding_input_tokens"] += prompt
+            totals["embedding_output_tokens"] += completion
+        elif current_section == "vlm":
+            totals["vlm_llm_input_tokens"] += prompt
+            totals["vlm_llm_output_tokens"] += completion
+    return totals
+
+
+def read_openviking_model_totals(base_url: str) -> dict[str, int]:
+    """Read cumulative OpenViking model tokens from a running server."""
+
+    body, _ = http_json(f"{base_url.rstrip('/')}/api/v1/observer/models", timeout=30.0)
+    if not isinstance(body, dict):
+        raise HarnessError("OpenViking observer returned a non-object response")
+    result = body.get("result", {})
+    status = result.get("status", "") if isinstance(result, dict) else ""
+    if not isinstance(status, str):
+        raise HarnessError("OpenViking observer response has no textual status")
+    if "No model usage data available" in status:
+        return {field: 0 for field in OPENVIKING_TOKEN_FIELDS}
+    return parse_openviking_model_totals(status)
+
+
+def openviking_token_delta(
+    baseline: Mapping[str, Any], final: Mapping[str, Any]
+) -> dict[str, int]:
+    """Return a non-negative per-field token delta between observer snapshots."""
+
+    delta = {
+        field: max(int(final.get(field, 0)) - int(baseline.get(field, 0)), 0)
+        for field in OPENVIKING_TOKEN_FIELDS
+    }
+    delta["embedding_total_tokens"] = (
+        delta["embedding_input_tokens"] + delta["embedding_output_tokens"]
+    )
+    delta["vlm_llm_total_tokens"] = (
+        delta["vlm_llm_input_tokens"] + delta["vlm_llm_output_tokens"]
+    )
+    delta["all_openviking_model_tokens"] = (
+        delta["embedding_total_tokens"] + delta["vlm_llm_total_tokens"]
+    )
+    return delta
 
 
 def wait_for_health(
