@@ -135,6 +135,9 @@ scripts. Every question uses an independent session and the official
 `readonly_gateway.py`, which preserves `session_search` and OpenViking recall
 but detaches SessionDB persistence, disables provider sync/commit and
 background memory review, and removes every Memory/Knowledge write tool. QA
+disables provider startup recovery inside the read-only Gateway so a stale
+pending-session durability marker cannot trigger a duplicate commit during QA.
+QA
 runs directly against the frozen baselines rather than disposable mutable
 copies. After both arms finish, the runner verifies that Native `state.db`,
 E2E `state.db`, and OpenViking long-term memory fingerprints are unchanged;

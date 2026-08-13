@@ -76,6 +76,24 @@ def _block_write_tool_dispatch(manager: Any) -> None:
         manager.handle_builtin_tool = MethodType(_read_only_builtin, manager)
 
 
+def _disable_openviking_startup_writes() -> None:
+    """Stop provider initialization from recovering/committing old sessions.
+
+    OpenViking normally treats pending-session recovery as a durability feature.
+    During a benchmark QA process that behavior is a write: provider.initialize()
+    runs before ``enforce_read_only_agent`` can patch the provider instance. Patch
+    the class first so creating the agent remains recall-only from its first line.
+    """
+
+    try:
+        from plugins.memory.openviking import OpenVikingMemoryProvider
+    except ImportError:
+        return
+
+    OpenVikingMemoryProvider._recover_pending_sessions = _noop
+    OpenVikingMemoryProvider._mark_session_pending = _noop
+
+
 def _append_audit(record: dict[str, Any]) -> None:
     raw_path = os.environ.get("HERMES_LOCOMO_READ_ONLY_AUDIT", "").strip()
     if not raw_path:
@@ -97,6 +115,7 @@ def _write_audit(agent: Any, recall_db: Any) -> None:
         "memory_commit": False,
         "memory_write_tools": False,
         "background_memory_review": False,
+        "provider_startup_recovery": False,
     })
 
 
@@ -189,6 +208,8 @@ def install_read_only_gateway_patch() -> None:
             "readonly_gateway.py may only run with HERMES_LOCOMO_READ_ONLY_QA=1"
         )
 
+    _disable_openviking_startup_writes()
+
     from gateway.platforms.api_server import APIServerAdapter
 
     original = APIServerAdapter._create_agent
@@ -208,6 +229,7 @@ def install_read_only_gateway_patch() -> None:
             "memory_commit": False,
             "memory_write_tools": False,
             "background_memory_review": False,
+            "provider_startup_recovery": False,
         }
     )
 

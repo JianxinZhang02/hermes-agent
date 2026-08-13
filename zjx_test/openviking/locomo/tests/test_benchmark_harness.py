@@ -6,6 +6,8 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -150,6 +152,30 @@ def test_readonly_gateway_keeps_recall_and_blocks_every_memory_write_path() -> N
         agent._memory_manager.handle_tool_call("viking_remember", {})
     )["success"] is False
     assert json.loads(agent._memory_manager.handle_builtin_tool({}))["success"] is False
+
+
+def test_readonly_gateway_disables_openviking_startup_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OpenVikingMemoryProvider:
+        def _recover_pending_sessions(self):
+            raise AssertionError("startup recovery must be replaced")
+
+        def _mark_session_pending(self, _sid):
+            raise AssertionError("pending marker writes must be replaced")
+
+    plugins_module = types.ModuleType("plugins")
+    memory_module = types.ModuleType("plugins.memory")
+    openviking_module = types.ModuleType("plugins.memory.openviking")
+    openviking_module.OpenVikingMemoryProvider = OpenVikingMemoryProvider
+    monkeypatch.setitem(sys.modules, "plugins", plugins_module)
+    monkeypatch.setitem(sys.modules, "plugins.memory", memory_module)
+    monkeypatch.setitem(sys.modules, "plugins.memory.openviking", openviking_module)
+
+    readonly_gateway._disable_openviking_startup_writes()
+
+    assert OpenVikingMemoryProvider._recover_pending_sessions is readonly_gateway._noop
+    assert OpenVikingMemoryProvider._mark_session_pending is readonly_gateway._noop
 
 
 def test_openviking_0412_selects_matching_official_scripts(

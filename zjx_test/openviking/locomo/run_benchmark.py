@@ -1715,6 +1715,7 @@ def _assert_read_only_qa_audit(
         "memory_commit": False,
         "memory_write_tools": False,
         "background_memory_review": False,
+        "provider_startup_recovery": False,
     }
     for record in records:
         for key, expected in required.items():
