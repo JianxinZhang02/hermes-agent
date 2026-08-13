@@ -131,8 +131,14 @@ commands evaluate up to 10 questions (`1 × 10 convs`), up to 100 questions
 
 QA starts Hermes (and OpenViking for the e2e arm), but never runs the import
 scripts. Every question uses an independent session and the official
-`store:false` request. After both arms finish, the runner verifies that the
-saved Memory Baseline fingerprints are unchanged.
+`store:false` request. The experiment starts its Gateway through
+`readonly_gateway.py`, which preserves `session_search` and OpenViking recall
+but detaches SessionDB persistence, disables provider sync/commit and
+background memory review, and removes every Memory/Knowledge write tool. QA
+runs directly against the frozen baselines rather than disposable mutable
+copies. After both arms finish, the runner verifies that Native `state.db`,
+E2E `state.db`, and OpenViking long-term memory fingerprints are unchanged;
+the Gateway also emits one enforcement audit record per protected QA agent.
 
 Judge any saved QA set as a separate final stage:
 

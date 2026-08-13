@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 import benchmark_harness
+import readonly_gateway
 import run_benchmark
 from benchmark_harness import (
     HarnessError,
@@ -57,6 +58,98 @@ def test_vendor_integrity_contract_detects_tampering(tmp_path: Path) -> None:
     artifact.write_bytes(b"modified bytes\n")
     with pytest.raises(HarnessError, match="changed"):
         verify_vendor_files(vendor, manifest)
+
+
+def test_readonly_gateway_keeps_recall_and_blocks_every_memory_write_path() -> None:
+    class Provider:
+        name = "openviking"
+
+        def sync_turn(self, *_args, **_kwargs):
+            raise AssertionError("sync must be replaced")
+
+        def queue_prefetch(self, *_args, **_kwargs):
+            raise AssertionError("prefetch queue must be replaced")
+
+        def on_session_end(self, *_args, **_kwargs):
+            raise AssertionError("commit must be replaced")
+
+        def on_session_switch(self, *_args, **_kwargs):
+            raise AssertionError("switch commit must be replaced")
+
+        def on_memory_write(self, *_args, **_kwargs):
+            raise AssertionError("memory writes must be replaced")
+
+    class Manager:
+        providers = [Provider()]
+
+        def handle_tool_call(self, tool_name, args, **kwargs):
+            return f"read:{tool_name}"
+
+        def handle_builtin_tool(self, args, **kwargs):
+            raise AssertionError("built-in memory writes must be blocked")
+
+        def sync_all(self, *_args, **_kwargs):
+            raise AssertionError("sync must be replaced")
+
+        def queue_prefetch_all(self, *_args, **_kwargs):
+            raise AssertionError("prefetch queue must be replaced")
+
+        def on_session_end(self, *_args, **_kwargs):
+            raise AssertionError("commit must be replaced")
+
+        def on_session_switch(self, *_args, **_kwargs):
+            raise AssertionError("switch must be replaced")
+
+        def commit_session_boundary_async(self, *_args, **_kwargs):
+            raise AssertionError("commit must be replaced")
+
+        def on_memory_write(self, *_args, **_kwargs):
+            raise AssertionError("write must be replaced")
+
+        def notify_memory_tool_write(self, *_args, **_kwargs):
+            raise AssertionError("write mirror must be replaced")
+
+    recall_db = object()
+    agent = SimpleNamespace(
+        session_id="qa-1",
+        _session_db=recall_db,
+        _session_db_created=True,
+        _memory_manager=Manager(),
+        _memory_nudge_interval=10,
+        _turns_since_memory=9,
+        context_compressor=None,
+        tools=[
+            {"type": "function", "function": {"name": "session_search"}},
+            {"type": "function", "function": {"name": "memory"}},
+            {"type": "function", "function": {"name": "viking_search"}},
+            {"type": "function", "function": {"name": "viking_remember"}},
+        ],
+        valid_tool_names={
+            "session_search", "memory", "viking_search", "viking_remember"
+        },
+    )
+
+    readonly_gateway.enforce_read_only_agent(agent)
+
+    assert agent._get_session_db_for_recall() is recall_db
+    assert agent._session_db is None
+    assert agent._persist_disabled is True
+    assert agent._memory_nudge_interval == 0
+    assert {readonly_gateway._tool_name(item) for item in agent.tools} == {
+        "session_search", "viking_search"
+    }
+    assert agent.valid_tool_names == {"session_search", "viking_search"}
+    agent._memory_manager.sync_all("q", "a")
+    agent._memory_manager.on_session_end([])
+    agent._memory_manager.providers[0].sync_turn("q", "a")
+    agent._memory_manager.providers[0].on_session_end([])
+    assert agent._memory_manager.handle_tool_call("viking_search", {}) == (
+        "read:viking_search"
+    )
+    assert json.loads(
+        agent._memory_manager.handle_tool_call("viking_remember", {})
+    )["success"] is False
+    assert json.loads(agent._memory_manager.handle_builtin_tool({}))["success"] is False
 
 
 def test_openviking_0412_selects_matching_official_scripts(

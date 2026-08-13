@@ -35,6 +35,7 @@ from benchmark_harness import (
     load_base_environment,
     load_source_manifest,
     make_api_key,
+    ManagedProcess,
     materialize_hermes_homes,
     probe_hermes_model,
     probe_judge,
@@ -55,6 +56,7 @@ from benchmark_harness import (
     vendor_dir_for_version,
     verify_dataset,
     verify_vendor_files,
+    wait_for_health,
     openviking_memory_fingerprint,
     openviking_token_delta,
     read_openviking_model_totals,
@@ -1628,6 +1630,111 @@ def _evaluation_paths(paths: RunPaths, qa_id: str) -> dict[str, Path]:
     }
 
 
+def _start_read_only_qa_gateway(
+    args: argparse.Namespace,
+    *,
+    env: dict[str, str],
+    log_path: Path,
+    audit_path: Path,
+) -> ManagedProcess:
+    """Start the experiment-only Gateway that permits recall but no writes."""
+    audit_path.unlink(missing_ok=True)
+    qa_env = dict(env)
+    qa_env.update(
+        {
+            "HERMES_LOCOMO_READ_ONLY_QA": "1",
+            "HERMES_LOCOMO_READ_ONLY_AUDIT": str(audit_path.resolve()),
+        }
+    )
+    wrapper = Path(__file__).resolve().with_name("readonly_gateway.py")
+    process = ManagedProcess(
+        [
+            str(current_python_command()),
+            str(wrapper),
+            "gateway",
+            "run",
+            "--force",
+            "--no-supervise",
+        ],
+        qa_env,
+        Path(__file__).resolve().parents[3],
+        log_path,
+    ).start()
+    try:
+        wait_for_health(
+            f"http://127.0.0.1:{args.gateway_port}/health",
+            process,
+            timeout=args.startup_timeout,
+        )
+    except Exception:
+        process.stop()
+        raise
+    return process
+
+
+def _csv_row_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return sum(1 for _ in csv.DictReader(handle))
+
+
+def _assert_read_only_qa_audit(
+    output: Path, *, prior_answer_count: int
+) -> dict[str, Any]:
+    audit_path = output.parent / "readonly_gateway_audit.jsonl"
+    if not audit_path.is_file():
+        raise HarnessError(f"Read-only Gateway produced no audit file: {audit_path}")
+    records = []
+    for line_number, line in enumerate(
+        audit_path.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise HarnessError(
+                f"Invalid read-only Gateway audit JSON at line {line_number}: {exc}"
+            ) from exc
+        records.append(record)
+    answer_count = _csv_row_count(output)
+    new_answer_count = max(answer_count - prior_answer_count, 0)
+    policy_records = [r for r in records if r.get("record_type") == "policy_installed"]
+    agent_records = [r for r in records if r.get("record_type") == "protected_agent"]
+    if not policy_records:
+        raise HarnessError("Read-only Gateway did not confirm policy installation")
+    if len(agent_records) < new_answer_count:
+        raise HarnessError(
+            "Read-only Gateway audit has fewer protected agents than new QA answers: "
+            f"agents={len(agent_records)}, new_answers={new_answer_count}"
+        )
+    required = {
+        "state_db_writes": False,
+        "memory_sync": False,
+        "memory_commit": False,
+        "memory_write_tools": False,
+        "background_memory_review": False,
+    }
+    for record in records:
+        for key, expected in required.items():
+            if record.get(key) is not expected:
+                raise HarnessError(
+                    f"Read-only Gateway audit violation for {record.get('session_id')}: "
+                    f"{key}={record.get(key)!r}"
+                )
+        if record.get("record_type") == "protected_agent" and not record.get("session_recall"):
+            raise HarnessError(
+                f"Read-only Gateway lost baseline recall for {record.get('session_id')}"
+            )
+    return {
+        "audit_path": str(audit_path),
+        "protected_agent_count": len(agent_records),
+        "answer_count": answer_count,
+        "new_answer_count": new_answer_count,
+    }
+
+
 def _eval_command(
     args: argparse.Namespace,
     context: dict[str, Any],
@@ -1671,6 +1778,7 @@ def _run_native_qa(
     args: argparse.Namespace, context: dict[str, Any], output: Path
 ) -> None:
     paths: RunPaths = context["paths"]
+    prior_answer_count = _csv_row_count(output)
     _require_free_port(args.gateway_port, "Hermes gateway")
     api_key = make_api_key()
     env = _suite_env(
@@ -1681,12 +1789,11 @@ def _run_native_qa(
         result_dir=output.parent,
         api_key=api_key,
     )
-    gateway = start_gateway(
-        context["hermes_command"],
+    gateway = _start_read_only_qa_gateway(
+        args,
         env=env,
         log_path=output.parent / "logs" / "gateway.log",
-        port=args.gateway_port,
-        startup_timeout=args.startup_timeout,
+        audit_path=output.parent / "readonly_gateway_audit.jsonl",
     )
     try:
         run_logged_command(
@@ -1700,12 +1807,14 @@ def _run_native_qa(
         )
     finally:
         gateway.stop()
+    _assert_read_only_qa_audit(output, prior_answer_count=prior_answer_count)
 
 
 def _run_e2e_qa(
     args: argparse.Namespace, context: dict[str, Any], output: Path
 ) -> None:
     paths: RunPaths = context["paths"]
+    prior_answer_count = _csv_row_count(output)
     _require_free_port(args.openviking_port, "OpenViking")
     openviking = _start_openviking_runtime(
         args,
@@ -1726,12 +1835,11 @@ def _run_e2e_qa(
             result_dir=output.parent,
             api_key=api_key,
         )
-        gateway = start_gateway(
-            context["hermes_command"],
+        gateway = _start_read_only_qa_gateway(
+            args,
             env=env,
             log_path=output.parent / "logs" / "gateway.log",
-            port=args.gateway_port,
-            startup_timeout=args.startup_timeout,
+            audit_path=output.parent / "readonly_gateway_audit.jsonl",
         )
         try:
             run_logged_command(
@@ -1745,6 +1853,7 @@ def _run_e2e_qa(
             )
         finally:
             gateway.stop()
+        _assert_read_only_qa_audit(output, prior_answer_count=prior_answer_count)
     except BaseException as exc:
         e2e_stage_error = str(exc)
         raise
@@ -1875,6 +1984,10 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
             "request_store": False,
             "one_session_per_question": True,
             "one_isolated_memory_baseline_per_conv": True,
+            "strict_read_only_gateway": True,
+            "state_db_writes": False,
+            "provider_sync_and_commit": False,
+            "memory_write_tools": False,
         },
     }
     atomic_json(outputs["manifest"], manifest)
@@ -2000,6 +2113,10 @@ def run_qa(args: argparse.Namespace) -> int:
         "read_only_contract": {
             "request_store": False,
             "one_session_per_question": True,
+            "strict_read_only_gateway": True,
+            "state_db_writes": False,
+            "provider_sync_and_commit": False,
+            "memory_write_tools": False,
             "baseline_fingerprint_required_unchanged": True,
         },
     }
