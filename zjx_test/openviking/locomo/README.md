@@ -145,6 +145,23 @@ Judge reads only the saved question, prediction, reference answer and official
 judge rule. It does not start Hermes Gateway or OpenViking Server. The same
 Memory Baseline can therefore support any number of independent QA/Judge runs.
 
+An interrupted full build can also evaluate any subset whose child baselines
+already have `status: passed`. Sample indexes are zero-based, and ranges or
+comma-separated indexes are accepted. QA aggregates the selected Native and
+OpenViking CSVs before Judge produces one pooled comparison:
+
+```bash
+python zjx_test/openviking/locomo/run_benchmark.py qa \
+  --run-id locomo10-memory-v1 --samples 0-4 --qa-id first5-all
+
+python zjx_test/openviking/locomo/run_benchmark.py judge \
+  --run-id locomo10-memory-v1 --samples 0-4 --qa-id first5-all
+```
+
+The same `--samples` selection must be supplied to QA and Judge. Without
+`--samples`, collection QA continues to require a completed 10-conversation
+build.
+
 Inspect model-token usage at any time, including a failed or interrupted build:
 
 ```bash

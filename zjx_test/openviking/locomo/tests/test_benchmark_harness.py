@@ -605,6 +605,94 @@ def test_staged_cli_keeps_qa_count_out_of_memory_build_identity() -> None:
     assert all_questions.count is None
 
 
+def test_staged_cli_parses_sample_subsets_for_qa_and_judge() -> None:
+    parser = run_benchmark.build_parser()
+
+    qa = parser.parse_args(
+        ["qa", "--run-id", "partial", "--samples", "0-4", "--qa-id", "first5"]
+    )
+    judge = parser.parse_args(
+        [
+            "judge",
+            "--run-id",
+            "partial",
+            "--samples",
+            "0,2,4",
+            "--qa-id",
+            "first5",
+        ]
+    )
+
+    assert qa.samples == (0, 1, 2, 3, 4)
+    assert judge.samples == (0, 2, 4)
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["qa", "--run-id", "partial", "--samples", "4-0", "--qa-id", "bad"]
+        )
+
+
+def test_partial_collection_loads_only_selected_passed_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "locomo10.json"
+    dataset.write_text("[]", encoding="utf-8")
+    run_root = tmp_path / "runs"
+    paths = run_benchmark.RunPaths.create(run_root, "partial")
+    paths.root.mkdir(parents=True)
+    paths.build_collection_manifest.write_text(
+        json.dumps(
+            {
+                "run_id": "partial",
+                "status": "failed",
+                "dataset": {"sha256": "dataset-hash"},
+                "parameters": {"sample_count": 10},
+                "children": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    for index in range(5):
+        child = run_benchmark._collection_child_paths(paths, index)
+        child.root.mkdir(parents=True)
+        child.build_manifest.write_text(
+            json.dumps(
+                {
+                    "status": "passed",
+                    "scope": {
+                        "sample_index": index,
+                        "sample_id": f"conv-{index}",
+                        "expected_sessions": index + 1,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        run_benchmark,
+        "verify_dataset",
+        lambda path: {"path": str(dataset), "sha256": "dataset-hash"},
+    )
+
+    _, collection = run_benchmark._load_build_collection(
+        SimpleNamespace(
+            run_id="partial",
+            run_root=run_root,
+            dataset=dataset,
+            samples=(0, 1, 2, 3, 4),
+        )
+    )
+
+    assert collection["selection_mode"] == "passed_child_subset"
+    assert collection["selected_samples"] == [0, 1, 2, 3, 4]
+    assert [child["sample_id"] for child in collection["children"]] == [
+        "conv-0",
+        "conv-1",
+        "conv-2",
+        "conv-3",
+        "conv-4",
+    ]
+
+
 def test_collection_child_paths_physically_isolate_each_conv(tmp_path: Path) -> None:
     parent = run_benchmark.RunPaths.create(tmp_path, "locomo10")
     first = run_benchmark._collection_child_paths(parent, 0)

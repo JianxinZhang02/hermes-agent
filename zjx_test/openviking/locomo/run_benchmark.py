@@ -110,6 +110,34 @@ def _nonnegative(value: str) -> int:
     return parsed
 
 
+def _sample_selection(value: str) -> tuple[int, ...]:
+    """Parse a comma-separated list of zero-based sample indexes and ranges."""
+    selected: set[int] = set()
+    try:
+        for raw_part in value.split(","):
+            part = raw_part.strip()
+            if not part:
+                raise ValueError
+            if "-" in part:
+                raw_start, raw_end = part.split("-", 1)
+                start, end = int(raw_start), int(raw_end)
+                if start < 0 or end < start:
+                    raise ValueError
+                selected.update(range(start, end + 1))
+            else:
+                index = int(part)
+                if index < 0:
+                    raise ValueError
+                selected.add(index)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "samples must use zero-based indexes/ranges such as 0-4 or 0,2,4"
+        ) from exc
+    if not selected:
+        raise argparse.ArgumentTypeError("samples selection must not be empty")
+    return tuple(sorted(selected))
+
+
 def _default_hermes_home() -> Path:
     configured = os.environ.get("HERMES_HOME", "").strip()
     return Path(configured).expanduser() if configured else Path.home() / ".hermes"
@@ -1741,14 +1769,62 @@ def _load_build_collection(args: argparse.Namespace) -> tuple[RunPaths, dict[str
             f"Build collection manifest is missing: {paths.build_collection_manifest}"
         )
     manifest = _load_json(paths.build_collection_manifest)
-    if manifest.get("status") != "passed":
-        raise HarnessError(
-            f"Full LoCoMo Memory Build is not reusable (status={manifest.get('status')!r})"
-        )
     dataset = verify_dataset(args.dataset.expanduser().resolve())
     if dataset["sha256"] != manifest.get("dataset", {}).get("sha256"):
         raise HarnessError(
             "The current LoCoMo dataset does not match the build collection"
+        )
+
+    selected = getattr(args, "samples", None)
+    if selected is not None:
+        total_samples = int(manifest.get("parameters", {}).get("sample_count") or 0)
+        invalid = [index for index in selected if index >= total_samples]
+        if invalid:
+            raise HarnessError(
+                f"Selected LoCoMo sample indexes are outside 0..{max(total_samples - 1, 0)}: "
+                + ", ".join(str(index) for index in invalid)
+            )
+        children: list[dict[str, Any]] = []
+        for sample_index in selected:
+            child_paths = _collection_child_paths(paths, sample_index)
+            child_manifest_path = child_paths.build_manifest
+            if not child_manifest_path.is_file():
+                raise HarnessError(
+                    f"Selected child Memory Build is missing: {child_manifest_path}"
+                )
+            child_manifest = _load_json(child_manifest_path)
+            if child_manifest.get("status") != "passed":
+                raise HarnessError(
+                    f"Selected child Memory Build is not complete "
+                    f"(sample-{sample_index}, status={child_manifest.get('status')!r}): "
+                    f"{child_manifest_path}"
+                )
+            scope = child_manifest.get("scope", {})
+            if int(scope.get("sample_index", -1)) != sample_index:
+                raise HarnessError(
+                    f"Selected child manifest has the wrong sample index: {child_manifest_path}"
+                )
+            children.append(
+                {
+                    "sample_index": sample_index,
+                    "sample_id": str(scope.get("sample_id", "")),
+                    "expected_sessions": int(scope.get("expected_sessions", 0)),
+                    "child_run_id": f"sample-{sample_index}",
+                    "build_manifest": str(child_manifest_path),
+                    "build_manifest_sha256": sha256_file(child_manifest_path),
+                    "status": "passed",
+                }
+            )
+        selected_manifest = copy.deepcopy(manifest)
+        selected_manifest["children"] = children
+        selected_manifest["selected_samples"] = list(selected)
+        selected_manifest["selection_mode"] = "passed_child_subset"
+        return paths, selected_manifest
+
+    if manifest.get("status") != "passed":
+        raise HarnessError(
+            f"Full LoCoMo Memory Build is not reusable (status={manifest.get('status')!r}). "
+            "Use --samples with already-passed child indexes for a partial collection."
         )
     children = manifest.get("children", [])
     if len(children) != int(manifest["parameters"]["sample_count"]):
@@ -1778,6 +1854,9 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
     parameters = {
         "build_run_id": collection["run_id"],
         "dataset_sha256": collection["dataset"]["sha256"],
+        "sample_indices": [
+            int(child["sample_index"]) for child in collection["children"]
+        ],
         "sample_count": len(collection["children"]),
         "count_per_sample": args.count,
         "qa_parallel": args.qa_parallel,
@@ -1799,7 +1878,7 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
         },
     }
     atomic_json(outputs["manifest"], manifest)
-    print("Read-only QA over all isolated LoCoMo Memory Baselines")
+    print("Read-only QA over selected isolated LoCoMo Memory Baselines")
     print(f"  collection run id: {collection['run_id']}")
     print(f"  QA id:             {qa_id}")
     print(f"  conversations:     {len(collection['children'])}")
@@ -1847,7 +1926,7 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
         _aggregate_token_reports(
             child_token_reports,
             outputs["token_usage"],
-            title="Full LoCoMo Read-only QA Token Usage",
+            title="Selected LoCoMo Read-only QA Token Usage",
             status="passed",
         )
         manifest.update(
@@ -1864,10 +1943,16 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
         )
         atomic_json(outputs["manifest"], manifest)
         print(
-            f"\nPASS: full LoCoMo read-only QA completed "
+            f"\nPASS: selected LoCoMo read-only QA completed "
             f"({alignment['question_count']} questions per arm): {outputs['manifest']}"
         )
-        print(f"Next: run judge with --run-id {collection['run_id']} --qa-id {qa_id}")
+        sample_spec = ",".join(
+            str(child["sample_index"]) for child in collection["children"]
+        )
+        print(
+            f"Next: run judge with --run-id {collection['run_id']} "
+            f"--samples {sample_spec} --qa-id {qa_id}"
+        )
         return 0
     except Exception as exc:
         manifest.update({"status": "failed", "failed_at": utc_now(), "error": str(exc)})
@@ -1875,7 +1960,7 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
             _aggregate_token_reports(
                 expected_child_token_reports,
                 outputs["token_usage"],
-                title="Full LoCoMo Read-only QA Token Usage",
+                title="Selected LoCoMo Read-only QA Token Usage",
                 status="failed",
             )
             manifest["token_usage"] = str(outputs["token_usage"])
@@ -2034,6 +2119,14 @@ def run_judge(args: argparse.Namespace) -> int:
     qa_manifest = _load_json(outputs["manifest"])
     if qa_manifest.get("status") != "passed":
         raise HarnessError(f"QA stage is not complete: {outputs['manifest']}")
+    selected_samples = getattr(args, "samples", None)
+    if selected_samples is not None:
+        qa_samples = tuple(qa_manifest.get("parameters", {}).get("sample_indices", []))
+        if qa_samples != tuple(selected_samples):
+            raise HarnessError(
+                "Judge --samples does not match the saved QA selection: "
+                f"requested={list(selected_samples)}, qa={list(qa_samples)}"
+            )
     (
         context["judge_url"],
         context["judge_token"],
@@ -2047,6 +2140,7 @@ def run_judge(args: argparse.Namespace) -> int:
         "started_at": utc_now(),
         "build_run_id": context["run_id"],
         "qa_id": args.qa_id,
+        "sample_indices": qa_manifest.get("parameters", {}).get("sample_indices"),
         "judge": {
             "base_url": context["judge_url"],
             "model": context["judge_model"],
@@ -2267,6 +2361,12 @@ def build_parser() -> argparse.ArgumentParser:
     qa.add_argument(
         "--qa-id", default=None, help="Distinct result id under the build run"
     )
+    qa.add_argument(
+        "--samples",
+        type=_sample_selection,
+        default=None,
+        help="Zero-based child sample indexes/ranges, e.g. 0-4 or 0,2,4",
+    )
     qa.add_argument("--count", type=_positive, default=None)
     qa.add_argument("--qa-parallel", type=_positive, default=4)
     qa.add_argument("--qa-error-retries", type=_nonnegative, default=2)
@@ -2285,6 +2385,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(judge)
     judge.add_argument("--qa-id", required=True)
+    judge.add_argument(
+        "--samples",
+        type=_sample_selection,
+        default=None,
+        help="Must match the sample subset used by the saved QA stage",
+    )
     judge.add_argument("--judge-parallel", type=_positive, default=5)
     judge.add_argument("--judge-error-retries", type=_nonnegative, default=2)
     judge.set_defaults(handler=run_judge)
