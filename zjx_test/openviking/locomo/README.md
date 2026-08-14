@@ -137,8 +137,11 @@ but detaches SessionDB persistence, disables provider sync/commit and
 background memory review, and removes every Memory/Knowledge write tool. QA
 disables provider startup recovery inside the read-only Gateway so a stale
 pending-session durability marker cannot trigger a duplicate commit during QA.
-QA
-runs directly against the frozen baselines rather than disposable mutable
+The model-facing tool boundary is also a hard allowlist: Native receives only
+`session_search`; E2E receives only `session_search`, `viking_search`,
+`viking_read`, and `viking_browse`. Terminal, filesystem, code-execution,
+skills, web, and every write tool are absent from QA model schemas. QA runs
+directly against the frozen baselines rather than disposable mutable
 copies. After both arms finish, the runner verifies that Native `state.db`,
 E2E `state.db`, and OpenViking long-term memory fingerprints are unchanged;
 the Gateway also emits one enforcement audit record per protected QA agent.

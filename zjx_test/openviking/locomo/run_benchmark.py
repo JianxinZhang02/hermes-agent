@@ -1633,6 +1633,7 @@ def _evaluation_paths(paths: RunPaths, qa_id: str) -> dict[str, Path]:
 def _start_read_only_qa_gateway(
     args: argparse.Namespace,
     *,
+    suite: str,
     env: dict[str, str],
     log_path: Path,
     audit_path: Path,
@@ -1643,6 +1644,7 @@ def _start_read_only_qa_gateway(
     qa_env.update(
         {
             "HERMES_LOCOMO_READ_ONLY_QA": "1",
+            "HERMES_LOCOMO_READ_ONLY_SUITE": suite,
             "HERMES_LOCOMO_READ_ONLY_AUDIT": str(audit_path.resolve()),
         }
     )
@@ -1680,7 +1682,7 @@ def _csv_row_count(path: Path) -> int:
 
 
 def _assert_read_only_qa_audit(
-    output: Path, *, prior_answer_count: int
+    output: Path, *, prior_answer_count: int, expected_suite: str
 ) -> dict[str, Any]:
     audit_path = output.parent / "readonly_gateway_audit.jsonl"
     if not audit_path.is_file():
@@ -1716,7 +1718,12 @@ def _assert_read_only_qa_audit(
         "memory_write_tools": False,
         "background_memory_review": False,
         "provider_startup_recovery": False,
+        "tool_allowlist_enforced": True,
     }
+    expected_tools = {
+        "native": ["session_search"],
+        "e2e": ["session_search", "viking_browse", "viking_read", "viking_search"],
+    }[expected_suite]
     for record in records:
         for key, expected in required.items():
             if record.get(key) is not expected:
@@ -1724,6 +1731,24 @@ def _assert_read_only_qa_audit(
                     f"Read-only Gateway audit violation for {record.get('session_id')}: "
                     f"{key}={record.get(key)!r}"
                 )
+        if record.get("suite") != expected_suite:
+            raise HarnessError(
+                "Read-only Gateway audit suite mismatch: "
+                f"expected={expected_suite}, actual={record.get('suite')!r}"
+            )
+        if record.get("allowed_tools") != expected_tools:
+            raise HarnessError(
+                "Read-only Gateway audit tool allowlist mismatch: "
+                f"expected={expected_tools}, actual={record.get('allowed_tools')!r}"
+            )
+        if (
+            record.get("record_type") == "protected_agent"
+            and record.get("exposed_tools") != expected_tools
+        ):
+            raise HarnessError(
+                "Read-only Gateway exposed unexpected QA tools: "
+                f"expected={expected_tools}, actual={record.get('exposed_tools')!r}"
+            )
         if record.get("record_type") == "protected_agent" and not record.get("session_recall"):
             raise HarnessError(
                 f"Read-only Gateway lost baseline recall for {record.get('session_id')}"
@@ -1792,6 +1817,7 @@ def _run_native_qa(
     )
     gateway = _start_read_only_qa_gateway(
         args,
+        suite="native",
         env=env,
         log_path=output.parent / "logs" / "gateway.log",
         audit_path=output.parent / "readonly_gateway_audit.jsonl",
@@ -1808,7 +1834,9 @@ def _run_native_qa(
         )
     finally:
         gateway.stop()
-    _assert_read_only_qa_audit(output, prior_answer_count=prior_answer_count)
+    _assert_read_only_qa_audit(
+        output, prior_answer_count=prior_answer_count, expected_suite="native"
+    )
 
 
 def _run_e2e_qa(
@@ -1838,6 +1866,7 @@ def _run_e2e_qa(
         )
         gateway = _start_read_only_qa_gateway(
             args,
+            suite="e2e",
             env=env,
             log_path=output.parent / "logs" / "gateway.log",
             audit_path=output.parent / "readonly_gateway_audit.jsonl",
@@ -1854,7 +1883,9 @@ def _run_e2e_qa(
             )
         finally:
             gateway.stop()
-        _assert_read_only_qa_audit(output, prior_answer_count=prior_answer_count)
+        _assert_read_only_qa_audit(
+            output, prior_answer_count=prior_answer_count, expected_suite="e2e"
+        )
     except BaseException as exc:
         e2e_stage_error = str(exc)
         raise
@@ -1989,6 +2020,15 @@ def _run_collection_qa(args: argparse.Namespace) -> int:
             "state_db_writes": False,
             "provider_sync_and_commit": False,
             "memory_write_tools": False,
+            "tool_allowlists": {
+                "native": ["session_search"],
+                "e2e": [
+                    "session_search",
+                    "viking_browse",
+                    "viking_read",
+                    "viking_search",
+                ],
+            },
         },
     }
     atomic_json(outputs["manifest"], manifest)
@@ -2118,6 +2158,15 @@ def run_qa(args: argparse.Namespace) -> int:
             "state_db_writes": False,
             "provider_sync_and_commit": False,
             "memory_write_tools": False,
+            "tool_allowlists": {
+                "native": ["session_search"],
+                "e2e": [
+                    "session_search",
+                    "viking_browse",
+                    "viking_read",
+                    "viking_search",
+                ],
+            },
             "baseline_fingerprint_required_unchanged": True,
         },
     }

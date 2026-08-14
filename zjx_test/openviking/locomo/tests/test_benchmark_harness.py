@@ -124,23 +124,29 @@ def test_readonly_gateway_keeps_recall_and_blocks_every_memory_write_path() -> N
             {"type": "function", "function": {"name": "session_search"}},
             {"type": "function", "function": {"name": "memory"}},
             {"type": "function", "function": {"name": "viking_search"}},
+            {"type": "function", "function": {"name": "viking_read"}},
+            {"type": "function", "function": {"name": "viking_browse"}},
             {"type": "function", "function": {"name": "viking_remember"}},
+            {"type": "function", "function": {"name": "terminal"}},
         ],
         valid_tool_names={
-            "session_search", "memory", "viking_search", "viking_remember"
+            "session_search", "memory", "viking_search", "viking_read",
+            "viking_browse", "viking_remember", "terminal"
         },
     )
 
-    readonly_gateway.enforce_read_only_agent(agent)
+    readonly_gateway.enforce_read_only_agent(agent, suite="e2e")
 
     assert agent._get_session_db_for_recall() is recall_db
     assert agent._session_db is None
     assert agent._persist_disabled is True
     assert agent._memory_nudge_interval == 0
     assert {readonly_gateway._tool_name(item) for item in agent.tools} == {
-        "session_search", "viking_search"
+        "session_search", "viking_search", "viking_read", "viking_browse"
     }
-    assert agent.valid_tool_names == {"session_search", "viking_search"}
+    assert agent.valid_tool_names == {
+        "session_search", "viking_search", "viking_read", "viking_browse"
+    }
     agent._memory_manager.sync_all("q", "a")
     agent._memory_manager.on_session_end([])
     agent._memory_manager.providers[0].sync_turn("q", "a")
@@ -152,6 +158,34 @@ def test_readonly_gateway_keeps_recall_and_blocks_every_memory_write_path() -> N
         agent._memory_manager.handle_tool_call("viking_remember", {})
     )["success"] is False
     assert json.loads(agent._memory_manager.handle_builtin_tool({}))["success"] is False
+
+
+def test_readonly_native_gateway_exposes_only_session_search() -> None:
+    recall_db = object()
+    agent = SimpleNamespace(
+        session_id="native-qa-1",
+        _session_db=recall_db,
+        _session_db_created=True,
+        _memory_manager=None,
+        _knowledge_base_manager=None,
+        _memory_nudge_interval=10,
+        _turns_since_memory=0,
+        context_compressor=None,
+        tools=[
+            {"type": "function", "function": {"name": "session_search"}},
+            {"type": "function", "function": {"name": "terminal"}},
+            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "memory"}},
+        ],
+        valid_tool_names={"session_search", "terminal", "read_file", "memory"},
+    )
+
+    readonly_gateway.enforce_read_only_agent(agent, suite="native")
+
+    assert [readonly_gateway._tool_name(item) for item in agent.tools] == [
+        "session_search"
+    ]
+    assert agent.valid_tool_names == {"session_search"}
 
 
 def test_readonly_gateway_disables_openviking_startup_recovery(

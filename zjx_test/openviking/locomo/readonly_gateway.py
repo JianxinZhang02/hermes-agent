@@ -23,6 +23,10 @@ WRITE_TOOL_NAMES = {
     "viking_forget",
     "viking_add_resource",
 }
+TOOL_ALLOWLISTS = {
+    "native": {"session_search"},
+    "e2e": {"session_search", "viking_search", "viking_read", "viking_browse"},
+}
 _AUDIT_LOCK = threading.Lock()
 
 
@@ -105,7 +109,24 @@ def _append_audit(record: dict[str, Any]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _write_audit(agent: Any, recall_db: Any) -> None:
+def _qa_suite() -> str:
+    suite = os.environ.get("HERMES_LOCOMO_READ_ONLY_SUITE", "").strip().lower()
+    if suite not in TOOL_ALLOWLISTS:
+        raise RuntimeError(
+            "HERMES_LOCOMO_READ_ONLY_SUITE must be 'native' or 'e2e', "
+            f"got {suite!r}"
+        )
+    return suite
+
+
+def _write_audit(
+    agent: Any,
+    recall_db: Any,
+    *,
+    suite: str,
+    allowed_tools: set[str],
+    exposed_tools: set[str],
+) -> None:
     _append_audit({
         "record_type": "protected_agent",
         "session_id": str(getattr(agent, "session_id", "") or ""),
@@ -116,11 +137,20 @@ def _write_audit(agent: Any, recall_db: Any) -> None:
         "memory_write_tools": False,
         "background_memory_review": False,
         "provider_startup_recovery": False,
+        "suite": suite,
+        "allowed_tools": sorted(allowed_tools),
+        "exposed_tools": sorted(exposed_tools),
+        "tool_allowlist_enforced": exposed_tools == allowed_tools,
     })
 
 
-def enforce_read_only_agent(agent: Any) -> Any:
+def enforce_read_only_agent(agent: Any, *, suite: str | None = None) -> Any:
     """Turn one normal Hermes agent into a recall-only evaluation agent."""
+
+    suite = suite or _qa_suite()
+    if suite not in TOOL_ALLOWLISTS:
+        raise RuntimeError(f"Unknown read-only QA suite: {suite!r}")
+    allowed_tools = set(TOOL_ALLOWLISTS[suite])
 
     # Preserve the already-opened baseline DB solely for session_search, then
     # detach it from every normal persistence/accounting path.  We intentionally
@@ -153,15 +183,23 @@ def enforce_read_only_agent(agent: Any) -> Any:
             if hasattr(compressor, attribute):
                 setattr(compressor, attribute, None)
 
-    # Remove all model-callable write tools. Keep session_search plus
-    # viking_search/viking_read/viking_browse for recall.
+    # Strict experiment boundary: the model receives recall/search tools only.
+    # Native gets session_search; official Hermes E2E additionally gets the
+    # three OpenViking read tools. This also removes terminal/files/code/skills.
     agent.tools = [
         schema for schema in list(getattr(agent, "tools", []) or [])
-        if _tool_name(schema) not in WRITE_TOOL_NAMES
+        if _tool_name(schema) in allowed_tools
     ]
     valid = getattr(agent, "valid_tool_names", None)
     if valid is not None:
-        valid.difference_update(WRITE_TOOL_NAMES)
+        valid.intersection_update(allowed_tools)
+    exposed_tools = {_tool_name(schema) for schema in agent.tools}
+    exposed_tools.discard("")
+    if exposed_tools != allowed_tools:
+        raise RuntimeError(
+            f"{suite} QA tool boundary is incomplete: "
+            f"expected={sorted(allowed_tools)}, exposed={sorted(exposed_tools)}"
+        )
 
     manager = getattr(agent, "_memory_manager", None)
     if manager is not None:
@@ -198,7 +236,13 @@ def enforce_read_only_agent(agent: Any) -> Any:
     if knowledge_manager is not None:
         _block_write_tool_dispatch(knowledge_manager)
 
-    _write_audit(agent, recall_db)
+    _write_audit(
+        agent,
+        recall_db,
+        suite=suite,
+        allowed_tools=allowed_tools,
+        exposed_tools=exposed_tools,
+    )
     return agent
 
 
@@ -209,6 +253,8 @@ def install_read_only_gateway_patch() -> None:
         )
 
     _disable_openviking_startup_writes()
+    suite = _qa_suite()
+    allowed_tools = TOOL_ALLOWLISTS[suite]
 
     from gateway.platforms.api_server import APIServerAdapter
 
@@ -217,7 +263,7 @@ def install_read_only_gateway_patch() -> None:
         return
 
     def _create_read_only_agent(self: Any, *args: Any, **kwargs: Any) -> Any:
-        return enforce_read_only_agent(original(self, *args, **kwargs))
+        return enforce_read_only_agent(original(self, *args, **kwargs), suite=suite)
 
     _create_read_only_agent._locomo_read_only_patch = True  # type: ignore[attr-defined]
     APIServerAdapter._create_agent = _create_read_only_agent
@@ -230,6 +276,9 @@ def install_read_only_gateway_patch() -> None:
             "memory_write_tools": False,
             "background_memory_review": False,
             "provider_startup_recovery": False,
+            "suite": suite,
+            "allowed_tools": sorted(allowed_tools),
+            "tool_allowlist_enforced": True,
         }
     )
 
