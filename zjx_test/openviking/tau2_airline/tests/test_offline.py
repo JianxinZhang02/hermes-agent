@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 
 from tau2_airline.config import DEFAULT_CONFIG, Paths, load_json, sha256_json
-from tau2_airline.hermes_agent import TauToolBridge, _jsonable, _system_prompt
+from tau2_airline.hermes_agent import (
+    TauToolBridge,
+    _clone_bound_tools,
+    _jsonable,
+    _system_prompt,
+)
 from tau2_airline.pipeline import _public_config, report
 from tau2_airline.tau2_runtime import _has_confirmation_aware_rule
 
@@ -35,6 +40,23 @@ class FakeMemory:
     def retrieve(self, query, *, limit):
         self.queries.append((query, limit))
         return "verify the current reservation before booking", [{"uri": "viking://memory/1"}]
+
+
+class FakeToolkit:
+    def __init__(self):
+        self.rows = []
+
+    def reserve(self, value):
+        self.rows.append(value)
+        return {"rows": len(self.rows)}
+
+
+class FakeBoundTool:
+    def __init__(self, owner):
+        self._func = owner.reserve
+
+    def __call__(self, **kwargs):
+        return self._func(**kwargs)
 
 
 def test_protocol_defaults_are_the_requested_airline_four_seed_cell():
@@ -75,6 +97,14 @@ def test_speculative_tool_result_matches_tau2_container_scalar_wire_shape():
         "ratio": "1.5",
         "rows": [["3", "False"]],
     }
+
+
+def test_bound_tool_clone_cannot_mutate_formal_toolkit():
+    formal = FakeToolkit()
+    cloned = _clone_bound_tools([FakeBoundTool(formal)])[0]
+    assert cloned(value="seat") == {"rows": 1}
+    assert formal.rows == []
+    assert cloned._func.__self__ is not formal
 
 
 def test_prewrite_memory_blocks_first_write_then_allows_reissued_call():

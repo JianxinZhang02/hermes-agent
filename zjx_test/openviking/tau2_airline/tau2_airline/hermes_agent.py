@@ -48,6 +48,30 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
+def _clone_bound_tools(tools: list[Any]) -> list[Any]:
+    """Clone TAU-2 tools and explicitly rebind methods to cloned toolkits.
+
+    TAU-2 Tool stores its callable in the private ``_func`` attribute. Pydantic
+    model deepcopy does not guarantee that this bound method follows the copied
+    toolkit, which can make speculative execution mutate the formal environment.
+    """
+    cloned_owners: dict[int, Any] = {}
+    cloned_tools: list[Any] = []
+    for tool in tools:
+        cloned_tool = deepcopy(tool)
+        func = getattr(tool, "_func", None)
+        owner = getattr(func, "__self__", None)
+        method_name = getattr(func, "__name__", None)
+        if owner is not None and method_name:
+            cloned_owner = cloned_owners.get(id(owner))
+            if cloned_owner is None:
+                cloned_owner = deepcopy(owner)
+                cloned_owners[id(owner)] = cloned_owner
+            object.__setattr__(cloned_tool, "_func", getattr(cloned_owner, method_name))
+        cloned_tools.append(cloned_tool)
+    return cloned_tools
+
+
 def _system_prompt(policy: str, memory_scope: str, memory_block: str | None) -> str:
     memory = (
         "No OpenViking experience memory is enabled for this arm."
@@ -256,7 +280,7 @@ class HermesTau2Runtime:
 
     def respond(self, user_text: str, state: HermesState) -> tuple[str, HermesState, dict[str, Any]]:
         try:
-            isolated_tools = deepcopy(self.tools)
+            isolated_tools = _clone_bound_tools(self.tools)
         except Exception as exc:
             raise RuntimeError(
                 "TAU-2 Airline tools could not be isolated for Hermes speculative execution; "
