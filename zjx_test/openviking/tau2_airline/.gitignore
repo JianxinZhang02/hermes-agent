@@ -1,0 +1,6 @@
+results/
+.external/
+.env.tau2
+__pycache__/
+.pytest_cache/
+
