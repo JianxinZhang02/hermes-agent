@@ -81,34 +81,60 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
     if manifest_path.is_file() and not force:
         return json.loads(manifest_path.read_text(encoding="utf-8"))
     train_results = paths.corpus / "train_results.json"
-    run_cell(
-        tau2_repo=paths.tau2_repo,
-        hermes_repo=paths.hermes_repo,
-        config=config,
-        output=train_results,
-        split=config["train_split"],
-        num_tasks=int(config["train_tasks"]),
-        seed=int(config["seeds"][0]),
-        memory_enabled=False,
-        fixture=None,
-        reset=force,
-    )
+    progress_path = paths.corpus / "commit_progress.json"
+    if force and progress_path.exists():
+        progress_path.unlink()
+    if not train_results.is_file() or force:
+        run_cell(
+            tau2_repo=paths.tau2_repo,
+            hermes_repo=paths.hermes_repo,
+            config=config,
+            output=train_results,
+            split=config["train_split"],
+            num_tasks=int(config["train_tasks"]),
+            seed=int(config["seeds"][0]),
+            memory_enabled=False,
+            fixture=None,
+            reset=force,
+        )
     data = json.loads(train_results.read_text(encoding="utf-8"))
     policy_path = paths.tau2_repo / "data" / "tau2" / "domains" / "airline" / "policy.md"
     policy = policy_path.read_text(encoding="utf-8")
     adapter = OpenVikingAdapter(config)
-    committed = []
+    progress = (
+        json.loads(progress_path.read_text(encoding="utf-8"))
+        if progress_path.is_file()
+        else {"corpus_revision": config.get("corpus_revision"), "committed": []}
+    )
+    if progress.get("corpus_revision") != config.get("corpus_revision"):
+        raise RuntimeError(
+            "OpenViking corpus revision changed while commit progress exists; "
+            "use a new run directory or explicitly restart build with --force"
+        )
+    committed = list(progress.get("committed") or [])
+    committed_ids = {str(row["task_id"]) for row in committed}
     skipped = []
     for sim in data.get("simulations") or []:
         task_id = str(sim.get("task_id"))
         if _reward(sim) < 1.0:
             skipped.append({"task_id": task_id, "reward": _reward(sim)})
             continue
+        if task_id in committed_ids:
+            continue
+        revision = str(config.get("corpus_revision") or "v1")
         result = adapter.commit_transcript(
-            f"tau2-airline-hermes-train-{task_id}",
+            f"tau2-airline-hermes-train-{revision}-{task_id}",
             _rich_transcript(sim, policy),
         )
         committed.append({"task_id": task_id, "reward": _reward(sim), **result})
+        committed_ids.add(task_id)
+        write_json(
+            progress_path,
+            {
+                "corpus_revision": config.get("corpus_revision"),
+                "committed": committed,
+            },
+        )
     if not committed:
         raise RuntimeError("No successful TAU-2 train trajectory was available to commit")
     fingerprint = adapter.fingerprint()
@@ -119,6 +145,7 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
         "train_split": config["train_split"],
         "requested_train_tasks": config["train_tasks"],
         "success_only": True,
+        "corpus_revision": config.get("corpus_revision"),
         "transcript_only": True,
         "reward_or_assertions_exposed_to_extractor": False,
         "committed_count": len(committed),

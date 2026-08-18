@@ -17,6 +17,7 @@
 2. 工具不是 Hermes 的 `terminal`、`session_search` 等通用工具，而是当前 TAU-2 Airline Environment 绑定的业务工具；这是 TAU-2 正确评测所必需的。
 3. Hermes 原生 Session DB、Memory Provider、`MEMORY.md/USER.md` 和上下文文件均关闭。基线是 no-memory，不是 Hermes Native Memory。
 4. OpenViking build 只提交 reward=1 的 train trajectory；不会把 reward、断言或 test 数据交给记忆提取器。
+   Build 会把每条成功提交立即写入 `corpus/commit_progress.json`，失败重跑时跳过已完成项；`corpus_revision` 同时隔离旧版客户端可能留下的半成品 session。
 5. eval 不创建或提交 OpenViking Session，只执行 `search/read`。开始与结束会比较 API 级 trajectory snapshot，并审计所有 Hermes trace 中的 OpenViking write count 必须为 0。
 6. 当前 OpenViking 官方 agent 会在写工具执行前重新生成该 assistant step。本 harness 因为坚持使用完整 Hermes Agent Loop，采取语义等价的桥接：Hermes 先在当前 Airline 环境的深拷贝中完成一轮决策；第一次 write-like 调用不执行而注入 Top-2，Hermes 重新决策；随后结构化工具调用被逐个回放给 TAU-2 正式环境。正式环境只执行一次，因而 TAU-2 的 action checks 和 DB evaluator 都能看到工具调用。每次回放会比较隔离副本与正式环境的工具结果，任何不一致都会使 eval 失败。报告应标记为 `Hermes speculative replay bridge`，不能冒充官方 LLMAgent adapter 的逐 token 完全复现。
 7. OpenViking snapshot 是通过公共 search/read API 获得的宽查询快照，不是服务端私有磁盘数据库的全量哈希；零写入同时由代码路径和 trace 审计保证。
