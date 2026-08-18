@@ -6,6 +6,7 @@ import sys
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,26 @@ def _role(message: Any) -> str:
 
 
 def _jsonable(value: Any) -> Any:
+    """Mirror TAU-2 Environment.to_json_str() result normalization.
+
+    TAU-2 stringifies scalar values nested in ordinary containers before JSON
+    encoding them. Matching that wire shape is required both for the Hermes
+    speculative tool result and the later formal-environment replay check.
+    """
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
-    if isinstance(value, (dict, list, str, int, float, bool)) or value is None:
+    if isinstance(value, str) or value is None:
         return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     return str(value)
 
 

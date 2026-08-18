@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from tau2_airline.config import DEFAULT_CONFIG, Paths, load_json, sha256_json
-from tau2_airline.hermes_agent import TauToolBridge, _system_prompt
+from tau2_airline.hermes_agent import TauToolBridge, _jsonable, _system_prompt
 from tau2_airline.pipeline import _public_config, report
 from tau2_airline.tau2_runtime import _has_confirmation_aware_rule
 
@@ -68,6 +68,15 @@ def test_confirmation_aware_rule_accepts_upstream_and_wrapped_appendix():
     assert _has_confirmation_aware_rule(wrapped)
 
 
+def test_speculative_tool_result_matches_tau2_container_scalar_wire_shape():
+    assert _jsonable({"count": 2, "ok": True, "ratio": 1.5, "rows": [(3, False)]}) == {
+        "count": "2",
+        "ok": "True",
+        "ratio": "1.5",
+        "rows": [["3", "False"]],
+    }
+
+
 def test_prewrite_memory_blocks_first_write_then_allows_reissued_call():
     tool = FakeTool()
     memory = FakeMemory()
@@ -77,7 +86,7 @@ def test_prewrite_memory_blocks_first_write_then_allows_reissued_call():
     assert "NOT executed" in first
     assert tool.calls == []
     second = bridge._execute(tool, {"id": "current-task"})
-    assert json.loads(second) == {"ok": True}
+    assert json.loads(second) == {"ok": "True"}
     assert tool.calls == [{"id": "current-task"}]
     assert memory.queries[0][1] == 2
 

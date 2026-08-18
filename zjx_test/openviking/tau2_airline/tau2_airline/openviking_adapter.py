@@ -71,6 +71,8 @@ class OpenVikingAdapter:
         if not task_id:
             return {"status": "no_task"}
         deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        next_report = started + 30
         last: dict[str, Any] = {}
         while time.monotonic() < deadline:
             last = await client.get_task(task_id) or {}
@@ -78,6 +80,14 @@ class OpenVikingAdapter:
                 return last
             if last.get("status") in {"failed", "cancelled"}:
                 raise RuntimeError(f"OpenViking task {task_id} failed: {last}")
+            if time.monotonic() >= next_report:
+                elapsed = time.monotonic() - started
+                print(
+                    f"        OpenViking task {task_id}: "
+                    f"status={last.get('status', 'unknown')} elapsed={elapsed:.0f}s",
+                    flush=True,
+                )
+                next_report = time.monotonic() + 30
             await asyncio.sleep(2)
         raise TimeoutError(f"OpenViking task {task_id} timed out: {last}")
 
@@ -192,16 +202,27 @@ class OpenVikingAdapter:
             "customer service flight passenger payment baggage",
             "update modify change policy procedure",
         ]
-        items: dict[str, str] = {}
-        for query in queries:
+        memory_uris: dict[str, str] = {}
+        query_outputs: dict[str, str] = {}
+        for index, query in enumerate(queries, 1):
+            print(f"      fingerprint search {index}/{len(queries)}", flush=True)
             block, rows = self.retrieve(query, limit=100)
+            print(f"        returned {len(rows)} memory matches", flush=True)
             for row in rows:
-                items[row["uri"]] = "present"
-            items[f"query:{query}"] = block
-        canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
+                uri = str(row.get("uri") or "").strip()
+                if uri:
+                    memory_uris[uri] = "present"
+            query_outputs[query] = block
+        canonical = json.dumps(
+            {"memory_uris": memory_uris, "query_outputs": query_outputs},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
         return {
             "kind": "api_retrieval_snapshot",
             "search_uri": self.config["search_uri"],
-            "item_count": len(items),
+            "item_count": len(memory_uris),
+            "non_empty_query_count": sum(bool(text.strip()) for text in query_outputs.values()),
             "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         }

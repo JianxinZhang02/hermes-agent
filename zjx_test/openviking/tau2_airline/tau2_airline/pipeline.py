@@ -114,6 +114,13 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
     committed = list(progress.get("committed") or [])
     committed_ids = {str(row["task_id"]) for row in committed}
     skipped = []
+    successful = [sim for sim in data.get("simulations") or [] if _reward(sim) >= 1.0]
+    print(
+        f"      cached train simulations: {len(data.get('simulations') or [])}; "
+        f"successful trajectories: {len(successful)}; already committed: {len(committed_ids)}",
+        flush=True,
+    )
+    commit_index = len(committed_ids)
     for sim in data.get("simulations") or []:
         task_id = str(sim.get("task_id"))
         if _reward(sim) < 1.0:
@@ -121,13 +128,24 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
             continue
         if task_id in committed_ids:
             continue
+        commit_index += 1
         revision = str(config.get("corpus_revision") or "v1")
+        print(
+            f"      commit {commit_index}/{len(successful)}: train task {task_id}",
+            flush=True,
+        )
+        commit_started = time.monotonic()
         result = adapter.commit_transcript(
             f"tau2-airline-hermes-train-{revision}-{task_id}",
             _rich_transcript(sim, policy),
         )
         committed.append({"task_id": task_id, "reward": _reward(sim), **result})
         committed_ids.add(task_id)
+        print(
+            f"        completed in {time.monotonic() - commit_started:.1f}s; "
+            f"OpenViking task={result.get('task_id')}",
+            flush=True,
+        )
         write_json(
             progress_path,
             {
@@ -137,7 +155,13 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
         )
     if not committed:
         raise RuntimeError("No successful TAU-2 train trajectory was available to commit")
+    print("      all successful trajectories committed; verifying retrieval fingerprint", flush=True)
     fingerprint = adapter.fingerprint()
+    if int(fingerprint.get("item_count", 0)) <= 0:
+        raise RuntimeError(
+            "OpenViking accepted the successful train sessions but no trajectory URI "
+            "is searchable; do not start eval"
+        )
     manifest = {
         "protocol": config["protocol"],
         "created_at_unix": time.time(),
@@ -198,17 +222,28 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
             )
             if writes:
                 raise RuntimeError(f"Eval cell attempted {writes} OpenViking writes: {output}")
-            replay_mismatches = sum(
-                1
+            replay_mismatch_events = [
+                event
                 for sim in simulations
                 for trace in _iter_traces(sim)
                 for event in trace.get("tool_events") or []
                 if event.get("executed") and event.get("speculative_replay_match") is False
-            )
+            ]
+            replay_mismatches = len(replay_mismatch_events)
             if replay_mismatches:
+                samples = [
+                    {
+                        "name": event.get("name"),
+                        "arguments": event.get("arguments"),
+                        "speculative": event.get("result"),
+                        "tau2": event.get("tau2_tool_results"),
+                    }
+                    for event in replay_mismatch_events[:3]
+                ]
                 raise RuntimeError(
                     f"Hermes speculative Airline tool results diverged from TAU-2 on "
-                    f"{replay_mismatches} calls: {output}"
+                    f"{replay_mismatches} calls: {output}; first samples="
+                    f"{json.dumps(samples, ensure_ascii=False, default=str)}"
                 )
             cells.append({"arm": arm, "seed": seed, "path": str(output), "simulations": len(simulations)})
     after = adapter.fingerprint()
