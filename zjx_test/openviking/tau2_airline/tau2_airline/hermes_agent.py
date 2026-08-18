@@ -197,6 +197,11 @@ class HermesTau2Runtime:
         assert self.bridge is not None
         from run_agent import AIAgent
 
+        request_overrides = {"temperature": self.config.get("temperature", 0)}
+        request_timeout = self.config.get("agent_request_timeout")
+        if request_timeout is not None:
+            request_overrides["timeout"] = float(request_timeout)
+
         self.agent = AIAgent(
             model=self.config["agent_model"],
             base_url=self.config.get("agent_base_url"),
@@ -207,7 +212,7 @@ class HermesTau2Runtime:
             disabled_toolsets=[],
             quiet_mode=True,
             ephemeral_system_prompt=prompt,
-            request_overrides={"temperature": self.config.get("temperature", 0)},
+            request_overrides=request_overrides,
             session_id=f"tau2-{self.task_id}-{hashlib.sha1(str(time.time_ns()).encode()).hexdigest()[:10]}",
             skip_context_files=True,
             load_soul_identity=False,

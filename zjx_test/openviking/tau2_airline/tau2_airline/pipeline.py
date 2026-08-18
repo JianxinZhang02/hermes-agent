@@ -65,6 +65,7 @@ def bootstrap(paths: Paths, config: dict[str, Any], *, force: bool = False) -> d
             seed=int(config["seeds"][0]),
             memory_enabled=False,
             fixture=None,
+            reset=force,
         )
     fixture = build_fixture(tau2_repo=paths.tau2_repo, results=raw, output=paths.fixture)
     if fixture["record_count"] != fixture["expected_task_count"]:
@@ -90,6 +91,7 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
         seed=int(config["seeds"][0]),
         memory_enabled=False,
         fixture=None,
+        reset=force,
     )
     data = json.loads(train_results.read_text(encoding="utf-8"))
     policy_path = paths.tau2_repo / "data" / "tau2" / "domains" / "airline" / "policy.md"
@@ -156,6 +158,7 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
                     seed=int(seed),
                     memory_enabled=memory_enabled,
                     fixture=paths.fixture,
+                    reset=force,
                 )
             data = json.loads(output.read_text(encoding="utf-8"))
             simulations = data.get("simulations") or []

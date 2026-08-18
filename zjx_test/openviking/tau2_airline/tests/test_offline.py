@@ -44,6 +44,8 @@ def test_protocol_defaults_are_the_requested_airline_four_seed_cell():
     assert config["eval_tasks"] == 20
     assert config["seeds"] == [300, 301, 302, 303]
     assert config["max_steps"] == 200
+    assert config["simulation_timeout"] == 900
+    assert config["agent_request_timeout"] == 180
     assert config["temperature"] == 0
     assert config["user_simulator_policy"] == "confirmation_aware"
     assert config["first_user_top_k"] == 4

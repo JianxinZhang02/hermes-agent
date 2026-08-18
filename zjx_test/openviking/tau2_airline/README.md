@@ -9,6 +9,8 @@
 
 两组固定使用相同的 test split、4 个种子 `300..303`、每个种子 20 个任务、相同首条用户消息、相同 User Simulator、`temperature=0` 和最多 200 steps。总计 160 个评测 simulation。
 
+每个 simulation 默认设置 900 秒 wall-clock 上限，每次 Hermes 模型请求默认设置 180 秒超时。TAU-2 checkpoint 会自动恢复；普通重跑不会删除已经完成的 simulation，只有显式 `--force` 才重置该阶段对应的 checkpoint。
+
 ## 重要边界
 
 1. Hermes 是真正的决策与工具循环：每个 user turn 都进入当前源码的 `AIAgent.run_conversation()`。

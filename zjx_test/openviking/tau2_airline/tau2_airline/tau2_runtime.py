@@ -237,6 +237,7 @@ def run_cell(
     seed: int,
     memory_enabled: bool,
     fixture: Path | None,
+    reset: bool = False,
 ) -> dict[str, Any]:
     add_tau2_to_path(tau2_repo)
     if config.get("user_simulator_policy") == "confirmation_aware":
@@ -259,7 +260,7 @@ def run_cell(
     from tau2.run import run_domain
 
     run_dir = output.with_suffix("")
-    if run_dir.exists():
+    if reset and run_dir.exists():
         shutil.rmtree(run_dir)
     config_cls = TextRunConfig if getattr(RunConfig, "__origin__", None) is not None else RunConfig
     result = run_domain(
@@ -275,10 +276,12 @@ def run_cell(
             llm_args_user=user_args,
             num_trials=1,
             max_steps=int(config.get("max_steps", 200)),
+            timeout=float(config.get("simulation_timeout", 900)),
             save_to=str(run_dir),
             max_concurrency=1,
             seed=seed,
             log_level="INFO",
+            auto_resume=True,
         )
     )
     compat = run_dir / "results.json"
