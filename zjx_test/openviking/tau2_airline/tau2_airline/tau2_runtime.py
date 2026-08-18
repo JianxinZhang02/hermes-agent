@@ -24,6 +24,19 @@ CONFIRMATION_AWARE_APPENDIX = """
 """
 
 
+def _has_confirmation_aware_rule(text: str) -> bool:
+    """Accept either the upstream PR #297 wording or our compatibility appendix."""
+    normalized = " ".join(text.split()).lower()
+    return (
+        "wait for the agent to confirm it is done before ending the conversation"
+        in normalized
+        or (
+            "reply with the requested confirmation" in normalized
+            and "do not emit `###stop###` in the same turn" in normalized
+        )
+    )
+
+
 def add_tau2_to_path(repo: Path) -> None:
     for candidate in (repo / "src", repo):
         if str(candidate) not in sys.path:
@@ -35,25 +48,40 @@ def ensure_confirmation_aware_user(repo: Path) -> dict[str, Any]:
         repo / "data" / "tau2" / "user_simulator" / "simulation_guidelines.md",
         repo / "data" / "tau2" / "user_simulator" / "simulation_guidelines_tools.md",
     ]
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
+        expected = ", ".join(str(path) for path in paths)
+        raise RuntimeError(
+            "TAU-2 user simulator guideline files are missing; "
+            f"expected at least one of: {expected}"
+        )
+
     patched = []
-    for path in paths:
-        if not path.is_file():
-            continue
+    for path in existing:
         text = path.read_text(encoding="utf-8")
-        if "do not emit `###STOP###` in the same turn" in text:
+        if _has_confirmation_aware_rule(text):
             continue
         backup = path.with_suffix(path.suffix + ".hermes_tau2.bak")
         if not backup.exists():
             backup.write_text(text, encoding="utf-8")
         path.write_text(text.rstrip() + "\n" + CONFIRMATION_AWARE_APPENDIX + "\n", encoding="utf-8")
         patched.append(str(path))
-    detected = all(
-        (not path.is_file()) or "do not emit `###STOP###` in the same turn" in path.read_text(encoding="utf-8")
-        for path in paths
-    )
-    if not detected:
-        raise RuntimeError("TAU-2 confirmation-aware user simulator prompt could not be established")
-    return {"policy": "confirmation_aware", "patched_files": patched, "upstream_pr": 297}
+    missing_rule = [
+        str(path)
+        for path in existing
+        if not _has_confirmation_aware_rule(path.read_text(encoding="utf-8"))
+    ]
+    if missing_rule:
+        raise RuntimeError(
+            "TAU-2 confirmation-aware user simulator prompt could not be established "
+            f"for: {', '.join(missing_rule)}"
+        )
+    return {
+        "policy": "confirmation_aware",
+        "checked_files": [str(path) for path in existing],
+        "patched_files": patched,
+        "upstream_pr": 297,
+    }
 
 
 def _scenario_sha(value: Any) -> str:

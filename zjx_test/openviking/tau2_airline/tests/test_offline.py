@@ -6,6 +6,7 @@ from pathlib import Path
 from tau2_airline.config import DEFAULT_CONFIG, Paths, load_json, sha256_json
 from tau2_airline.hermes_agent import TauToolBridge, _system_prompt
 from tau2_airline.pipeline import _public_config, report
+from tau2_airline.tau2_runtime import _has_confirmation_aware_rule
 
 
 class FakeTool:
@@ -47,6 +48,21 @@ def test_protocol_defaults_are_the_requested_airline_four_seed_cell():
     assert config["user_simulator_policy"] == "confirmation_aware"
     assert config["first_user_top_k"] == 4
     assert config["prewrite_top_k"] == 2
+
+
+def test_confirmation_aware_rule_accepts_upstream_and_wrapped_appendix():
+    upstream = (
+        "Do not end the conversation prematurely. Agreeing to an action is not "
+        "the same as the action being completed. If the agent offers to do "
+        "something, wait for the agent to confirm it is done before ending the "
+        "conversation."
+    )
+    wrapped = """
+    reply with the requested confirmation but do not emit `###STOP###` in the
+    same turn.
+    """
+    assert _has_confirmation_aware_rule(upstream)
+    assert _has_confirmation_aware_rule(wrapped)
 
 
 def test_prewrite_memory_blocks_first_write_then_allows_reissued_call():
