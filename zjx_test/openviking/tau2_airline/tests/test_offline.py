@@ -3,14 +3,24 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tau2_airline.config import DEFAULT_CONFIG, Paths, load_json, sha256_json
 from tau2_airline.hermes_agent import (
+    HermesTau2Runtime,
     TauToolBridge,
     _clone_bound_tools,
     _jsonable,
+    _preflight_airline_shadow,
     _system_prompt,
 )
-from tau2_airline.pipeline import _public_config, report
+from tau2_airline.pipeline import (
+    _cell_runtime_cost,
+    _public_config,
+    _quarantine_invalid_cell,
+    _replay_mismatch_events,
+    report,
+)
 from tau2_airline.tau2_runtime import _has_confirmation_aware_rule
 
 
@@ -105,6 +115,93 @@ def test_bound_tool_clone_cannot_mutate_formal_toolkit():
     assert cloned(value="seat") == {"rows": 1}
     assert formal.rows == []
     assert cloned._func.__self__ is not formal
+
+
+def test_speculative_shadow_persists_across_user_turns(monkeypatch, tmp_path):
+    """Regression: never reset the shadow DB to the stale initial snapshot."""
+    formal = FakeToolkit()
+    formal_tool = FakeBoundTool(formal)
+
+    monkeypatch.setattr(
+        "tau2_airline.hermes_agent.OpenVikingAdapter",
+        lambda _config: None,
+    )
+    runtime = HermesTau2Runtime(
+        tools=[formal_tool],
+        domain_policy="policy",
+        task_id="task",
+        config={},
+        hermes_repo=tmp_path,
+        memory_enabled=False,
+        trace_dir=tmp_path,
+    )
+
+    shadow = runtime.speculative_tools[0]
+    assert shadow(value="first") == {"rows": 1}
+    # Formal replay advances independently by the same operation.
+    assert formal_tool(value="first") == {"rows": 1}
+
+    # A later turn must reuse the advanced shadow.  Re-cloning the original
+    # formal Tool snapshot here was the bug that caused duplicate refunds and
+    # seat/reservation divergence in Airline seed 300.
+    assert runtime.speculative_tools[0] is shadow
+    assert shadow(value="second") == {"rows": 2}
+    assert formal_tool(value="second") == {"rows": 2}
+
+
+def test_real_airline_shadow_preflight_is_read_only():
+    pytest.importorskip("tau2.domains.airline.environment")
+    from tau2.domains.airline.environment import get_environment
+
+    environment = get_environment()
+    before = environment.get_db_hash()
+    _preflight_airline_shadow(environment.get_tools())
+    assert environment.get_db_hash() == before
+
+
+def test_invalid_cached_cell_is_costed_and_quarantined(tmp_path):
+    output = tmp_path / "cells" / "airline_openviking_seed300.json"
+    output.parent.mkdir()
+    checkpoint = output.with_suffix("")
+    traces = output.parent / f"{output.stem}_hermes_traces"
+    checkpoint.mkdir()
+    traces.mkdir()
+    data = {
+        "simulations": [
+            {
+                "messages": [
+                    {
+                        "raw_data": {
+                            "hermes_messages_delta": [],
+                            "usage_delta": {
+                                "input_tokens": 100,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                            },
+                            "api_calls": 2,
+                            "hermes_turn_latency_sec": 3.5,
+                            "tool_events": [
+                                {"executed": True, "speculative_replay_match": False}
+                            ],
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    output.write_text(json.dumps(data), encoding="utf-8")
+    assert len(_replay_mismatch_events(data)) == 1
+    cost = _cell_runtime_cost(data)
+    assert cost["total_tokens"] == 120
+    assert cost["tool_calls"] == 1
+
+    _quarantine_invalid_cell(output, "test mismatch", cost)
+    assert not output.exists()
+    invalid = list((tmp_path / "invalid_cells").glob("airline_openviking_seed300-*"))
+    assert len(invalid) == 1
+    assert (invalid[0] / output.name).is_file()
+    assert (invalid[0] / checkpoint.name).is_dir()
+    assert (invalid[0] / traces.name).is_dir()
 
 
 def test_prewrite_memory_blocks_first_write_then_allows_reissued_call():

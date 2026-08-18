@@ -105,6 +105,12 @@ def _register_agent() -> None:
     class HermesAgent(HalfDuplexAgent[HermesState]):
         def __init__(self, tools, domain_policy, **kwargs):
             super().__init__(tools=tools, domain_policy=domain_policy)
+            fatal = _RUNTIME.get("fatal_replay_error")
+            if fatal:
+                raise RuntimeError(
+                    "A prior Hermes/TAU-2 replay mismatch aborted this cell before "
+                    f"further model calls: {fatal}"
+                )
             task = kwargs.get("task")
             task_id = str(getattr(task, "id", "unknown"))
             self.runtime = HermesTau2Runtime(
@@ -133,6 +139,30 @@ def _register_agent() -> None:
                     and _normalized_tool_result(actual_results[0])
                     == _normalized_tool_result(expected.get("result"))
                 )
+                if not expected["speculative_replay_match"]:
+                    details = json.dumps(
+                        {
+                            "name": expected.get("name"),
+                            "arguments": expected.get("arguments"),
+                            "speculative": expected.get("result"),
+                            "tau2": actual_results,
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                    _RUNTIME["fatal_replay_error"] = details
+                    write_json(
+                        Path(_RUNTIME["trace_dir"]) / "fatal_replay_mismatch.json",
+                        {
+                            "error": "speculative_formal_replay_mismatch",
+                            "details": json.loads(details),
+                        },
+                    )
+                    raise RuntimeError(
+                        "Hermes speculative Airline tool result diverged immediately from "
+                        "TAU-2 formal replay; aborting this simulation before further model "
+                        "calls. " + details
+                    )
                 if state.replay_queue:
                     return self._next_replay_message(state), state
                 final = AssistantMessage(
@@ -284,6 +314,12 @@ def run_cell(
             auto_resume=True,
         )
     )
+    fatal = _RUNTIME.get("fatal_replay_error")
+    if fatal:
+        raise RuntimeError(
+            "TAU-2 cell aborted on the first speculative/formal replay mismatch; "
+            f"remaining tasks were blocked before Hermes model calls: {fatal}"
+        )
     compat = run_dir / "results.json"
     if compat.is_file():
         shutil.copyfile(compat, output)

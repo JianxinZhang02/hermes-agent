@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import statistics
 import time
 from pathlib import Path
@@ -34,6 +35,66 @@ def _iter_traces(sim: dict[str, Any]):
         raw = message.get("raw_data") or {}
         if "hermes_messages_delta" in raw:
             yield raw
+
+
+def _cell_runtime_cost(data: dict[str, Any]) -> dict[str, Any]:
+    usage_keys = (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    )
+    usage = {key: 0 for key in usage_keys}
+    api_calls = tool_calls = 0
+    latency_sec = 0.0
+    for sim in data.get("simulations") or []:
+        for trace in _iter_traces(sim):
+            delta = trace.get("usage_delta") or {}
+            for key in usage:
+                usage[key] += int(delta.get(key, 0) or 0)
+            api_calls += int(trace.get("api_calls", 0) or 0)
+            latency_sec += float(trace.get("hermes_turn_latency_sec", 0.0) or 0.0)
+            tool_calls += sum(
+                1 for event in trace.get("tool_events") or [] if event.get("executed")
+            )
+    return {
+        **usage,
+        "hermes_api_calls": api_calls,
+        "tool_calls": tool_calls,
+        "hermes_latency_sec": latency_sec,
+    }
+
+
+def _replay_mismatch_events(data: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        event
+        for sim in data.get("simulations") or []
+        for trace in _iter_traces(sim)
+        for event in trace.get("tool_events") or []
+        if event.get("executed") and event.get("speculative_replay_match") is False
+    ]
+
+
+def _quarantine_invalid_cell(output: Path, reason: str, cost: dict[str, Any]) -> None:
+    stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns()}"
+    quarantine = output.parent.parent / "invalid_cells" / f"{output.stem}-{stamp}"
+    quarantine.mkdir(parents=True, exist_ok=False)
+    candidates = (
+        output,
+        output.with_suffix(""),
+        output.parent / f"{output.stem}_hermes_traces",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            shutil.move(str(candidate), str(quarantine / candidate.name))
+    write_json(quarantine / "invalid_reason.json", {"reason": reason, "cost": cost})
+    print(
+        f"      quarantined invalid cached cell {output.name}: {reason}; "
+        f"consumed={json.dumps(cost, ensure_ascii=False, sort_keys=True)}",
+        flush=True,
+    )
 
 
 def _rich_transcript(sim: dict[str, Any], policy: str) -> list[dict[str, Any]]:
@@ -198,6 +259,15 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
     for seed in config["seeds"]:
         for arm, memory_enabled in (("no_memory", False), ("openviking", True)):
             output = paths.cells / f"airline_{arm}_seed{seed}.json"
+            if output.is_file() and not force:
+                cached = json.loads(output.read_text(encoding="utf-8"))
+                cached_mismatches = _replay_mismatch_events(cached)
+                if cached_mismatches:
+                    _quarantine_invalid_cell(
+                        output,
+                        f"{len(cached_mismatches)} speculative/formal replay mismatches",
+                        _cell_runtime_cost(cached),
+                    )
             if not output.is_file() or force:
                 run_cell(
                     tau2_repo=paths.tau2_repo,
@@ -222,13 +292,7 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
             )
             if writes:
                 raise RuntimeError(f"Eval cell attempted {writes} OpenViking writes: {output}")
-            replay_mismatch_events = [
-                event
-                for sim in simulations
-                for trace in _iter_traces(sim)
-                for event in trace.get("tool_events") or []
-                if event.get("executed") and event.get("speculative_replay_match") is False
-            ]
+            replay_mismatch_events = _replay_mismatch_events(data)
             replay_mismatches = len(replay_mismatch_events)
             if replay_mismatches:
                 samples = [
@@ -243,7 +307,8 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
                 raise RuntimeError(
                     f"Hermes speculative Airline tool results diverged from TAU-2 on "
                     f"{replay_mismatches} calls: {output}; first samples="
-                    f"{json.dumps(samples, ensure_ascii=False, default=str)}"
+                    f"{json.dumps(samples, ensure_ascii=False, default=str)}; consumed="
+                    f"{json.dumps(_cell_runtime_cost(data), ensure_ascii=False, sort_keys=True)}"
                 )
             cells.append({"arm": arm, "seed": seed, "path": str(output), "simulations": len(simulations)})
     after = adapter.fingerprint()

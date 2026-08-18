@@ -18,6 +18,8 @@ WRITE_PREFIX_DEFAULTS = (
     "modify_", "cancel_", "book_", "exchange_", "return_", "grant_", "reboot_",
 )
 
+_AIRLINE_SHADOW_PREFLIGHT_DONE = False
+
 
 def _role(message: Any) -> str:
     value = getattr(message, "role", "")
@@ -70,6 +72,46 @@ def _clone_bound_tools(tools: list[Any]) -> list[Any]:
             object.__setattr__(cloned_tool, "_func", getattr(cloned_owner, method_name))
         cloned_tools.append(cloned_tool)
     return cloned_tools
+
+
+def _preflight_airline_shadow(tools: list[Any]) -> None:
+    """Verify real Airline write-state isolation before any Hermes model call.
+
+    The check uses two disposable clones and executes the same state-changing
+    operation twice on each.  It catches both shared DB references and the
+    stale-per-turn reset bug without touching TAU-2's formal environment.
+    """
+    global _AIRLINE_SHADOW_PREFLIGHT_DONE
+    if _AIRLINE_SHADOW_PREFLIGHT_DONE:
+        return
+    by_name = {getattr(tool, "name", ""): tool for tool in tools}
+    if "cancel_reservation" not in by_name:
+        return
+    owner = getattr(getattr(by_name["cancel_reservation"], "_func", None), "__self__", None)
+    reservations = getattr(getattr(owner, "db", None), "reservations", None)
+    if not reservations:
+        raise RuntimeError("Airline shadow preflight could not find a disposable reservation")
+
+    original_snapshot = owner.db.model_dump_json()
+    left = _clone_bound_tools(tools)
+    right = _clone_bound_tools(tools)
+    left_cancel = next(tool for tool in left if tool.name == "cancel_reservation")
+    right_cancel = next(tool for tool in right if tool.name == "cancel_reservation")
+    reservation_id = next(iter(reservations))
+    for attempt in (1, 2):
+        left_result = json.dumps(_jsonable(left_cancel(reservation_id=reservation_id)), sort_keys=True)
+        right_result = json.dumps(_jsonable(right_cancel(reservation_id=reservation_id)), sort_keys=True)
+        if left_result != right_result:
+            raise RuntimeError(
+                f"Airline shadow preflight diverged on sequential write {attempt}; "
+                "refusing to start token-consuming simulations"
+            )
+    if owner.db.model_dump_json() != original_snapshot:
+        raise RuntimeError(
+            "Airline shadow preflight mutated the formal environment; "
+            "refusing to start token-consuming simulations"
+        )
+    _AIRLINE_SHADOW_PREFLIGHT_DONE = True
 
 
 def _system_prompt(policy: str, memory_scope: str, memory_block: str | None) -> str:
@@ -214,6 +256,21 @@ class HermesTau2Runtime:
         self.config = config
         self.hermes_repo = hermes_repo
         self.memory = OpenVikingAdapter(config) if memory_enabled else None
+        # TAU-2's agent-side Tool objects are an initial snapshot of the
+        # environment.  The formal environment is advanced later by replaying
+        # Hermes' tool calls, but that replay does not update these Tool
+        # objects.  Keep one isolated shadow toolkit for the whole simulation
+        # so speculative execution advances in lockstep with formal replay.
+        # Re-cloning self.tools on every user turn would reset the shadow to
+        # the initial DB and diverge after the first successful write.
+        try:
+            _preflight_airline_shadow(self.tools)
+            self.speculative_tools = _clone_bound_tools(self.tools)
+        except Exception as exc:
+            raise RuntimeError(
+                "TAU-2 Airline tools could not be isolated for Hermes speculative execution; "
+                "refusing to risk double mutation of the benchmark environment"
+            ) from exc
         self.bridge: TauToolBridge | None = None
         self.trace_dir = trace_dir
         self.agent: Any = None
@@ -279,20 +336,13 @@ class HermesTau2Runtime:
         }
 
     def respond(self, user_text: str, state: HermesState) -> tuple[str, HermesState, dict[str, Any]]:
-        try:
-            isolated_tools = _clone_bound_tools(self.tools)
-        except Exception as exc:
-            raise RuntimeError(
-                "TAU-2 Airline tools could not be isolated for Hermes speculative execution; "
-                "refusing to risk double mutation of the benchmark environment"
-            ) from exc
-        self.bridge = TauToolBridge(isolated_tools, self.memory, self.config)
+        self.bridge = TauToolBridge(self.speculative_tools, self.memory, self.config)
         self.bridge.register()
         if self.agent is None:
             self._create_agent(user_text)
         else:
             self.agent.tools = self.bridge.schemas()
-            self.agent.valid_tool_names = {tool.name for tool in isolated_tools}
+            self.agent.valid_tool_names = {tool.name for tool in self.speculative_tools}
         state.user_turn += 1
         self.bridge.start_user_turn(state.user_turn)
         before_messages = len(state.history)
