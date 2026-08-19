@@ -88,6 +88,21 @@ def _scenario_sha(value: Any) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
+def _build_tau_tool_calls(calls: list[dict[str, Any]], tool_call_cls: Any) -> list[Any] | None:
+    """TAU treats an empty list as a tool-call message, so absence must be None."""
+    if not calls:
+        return None
+    return [
+        tool_call_cls(
+            id=call["id"],
+            name=call["name"],
+            arguments=call["arguments"],
+            requestor=call.get("requestor", "assistant"),
+        )
+        for call in calls
+    ]
+
+
 def _register_agent() -> None:
     from tau2.agent.base_agent import HalfDuplexAgent
     from tau2.data_model.message import AssistantMessage, MultiToolMessage, ToolCall, ToolMessage
@@ -137,15 +152,7 @@ def _register_agent() -> None:
             return AssistantMessage(
                 role="assistant",
                 content=response,
-                tool_calls=[
-                    ToolCall(
-                        id=call["id"],
-                        name=call["name"],
-                        arguments=call["arguments"],
-                        requestor=call.get("requestor", "assistant"),
-                    )
-                    for call in calls
-                ],
+                tool_calls=_build_tau_tool_calls(calls, ToolCall),
                 raw_data=trace,
             ), state
 

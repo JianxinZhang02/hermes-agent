@@ -22,7 +22,7 @@ from tau2_airline.pipeline import (
     audit_memory,
     report,
 )
-from tau2_airline.tau2_runtime import _has_confirmation_aware_rule
+from tau2_airline.tau2_runtime import _build_tau_tool_calls, _has_confirmation_aware_rule
 
 
 class FakeTool:
@@ -194,6 +194,27 @@ def test_step_adapter_emits_tool_call_without_executing_business_tool(tmp_path):
     assert tool.calls == []
     assert trace["tool_events"][0]["executed_by_hermes"] is False
     assert trace["adapter"] == "hermes_configured_external_step_adapter"
+
+
+def test_tau_empty_tool_calls_are_none_not_an_empty_list():
+    class FakeTauToolCall:
+        def __init__(self, **kwargs):
+            self.values = kwargs
+
+    assert _build_tau_tool_calls([], FakeTauToolCall) is None
+    built = _build_tau_tool_calls(
+        [
+            {
+                "id": "call-1",
+                "name": "book_reservation",
+                "arguments": {"id": "current"},
+                "requestor": "assistant",
+            }
+        ],
+        FakeTauToolCall,
+    )
+    assert built is not None
+    assert built[0].values["name"] == "book_reservation"
 
 
 def test_prewrite_recall_discards_candidate_and_regenerates_without_execution(tmp_path):
