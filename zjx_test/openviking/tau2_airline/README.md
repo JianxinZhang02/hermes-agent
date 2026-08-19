@@ -38,6 +38,18 @@ source zjx_test/openviking/tau2_airline/.env.tau2
 
 启动已经配置好 Embedding 与 VLM 的 OpenViking Server：
 
+Agent trajectory 还要求实例级 Agent Evolution 总开关。在
+`/root/.openviking/ov.conf` 的 `server` 对象内设置：
+
+```json
+"agent_evolution": {
+  "enabled": true
+}
+```
+
+若该开关关闭，OpenViking 只会归档 Session，并在 commit 结果中返回
+`agent_memory_skip_reason=agent_evolution_disabled`；benchmark 会在第一次提交后立即失败。
+
 ```bash
 openviking-server
 ```
@@ -62,7 +74,7 @@ export OPENAI_API_BASE="$HERMES_AGENT_BASE_URL"
 
 ```bash
 cd /dfs/data/zjx/hermes-agent/zjx_test/openviking/tau2_airline
-RUN_DIR="$PWD/results/airline-step-agent-trajectory-v3"
+RUN_DIR="$PWD/results/airline-step-agent-trajectory-v4"
 
 # 只检查路径与 Python 依赖，不访问本机/服务器 OpenViking
 python run_benchmark.py preflight --offline --run-dir "$RUN_DIR"
@@ -96,12 +108,14 @@ python run_benchmark.py report --run-dir "$RUN_DIR"
 ```bash
 python run_benchmark.py build \
   --run-dir "$RUN_DIR" \
-  --openviking-account default-hermes-airline-step-agent-trajectory-v3 \
-  --openviking-user tau2-airline-hermes-step-agent-trajectory-v3 \
+  --openviking-account default-hermes-airline-step-agent-trajectory-v4 \
+  --openviking-user tau2-airline-hermes-step-agent-trajectory-v4 \
   --search-uri 'viking://user/memories/trajectories'
 ```
 
-旧 `async-loop-v2` 的 22 个 Session 只保留作诊断，不得作为新实验 corpus。`build` 后必须运行 `audit-memory`；只有严格 trajectory URI 与冻结内容 hash 均通过后才能进入 smoke/eval。
+旧 `async-loop-v2` 的 22 个 Session及 Agent Evolution 关闭时生成的 v3 archive
+只保留作诊断，不得作为新实验 corpus。`build` 后必须运行 `audit-memory`；只有严格
+trajectory URI 与冻结内容 hash 均通过后才能进入 smoke/eval。
 
 ## 结果
 

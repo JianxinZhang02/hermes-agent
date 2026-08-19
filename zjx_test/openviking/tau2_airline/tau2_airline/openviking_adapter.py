@@ -141,6 +141,19 @@ def _memory_uris(value: Any) -> list[str]:
     return sorted(found)
 
 
+def validate_agent_evolution_task(task: dict[str, Any]) -> None:
+    """Fail immediately when the server archived a session without Agent Memory."""
+    result = task.get("result") or {}
+    enabled = result.get("agent_evolution_enabled")
+    skip_reason = result.get("agent_memory_skip_reason")
+    if enabled is False or skip_reason == "agent_evolution_disabled":
+        raise RuntimeError(
+            "OpenViking Agent Evolution is disabled. Set "
+            "server.agent_evolution.enabled=true in ov.conf before rebuilding; "
+            f"server skip_reason={skip_reason!r}"
+        )
+
+
 class OpenVikingAdapter:
     """Read-only eval and explicit Agent-memory corpus build adapter."""
 
@@ -315,6 +328,7 @@ class OpenVikingAdapter:
                     commit_result.get("task_id"),
                     int(self.config.get("openviking_wait_timeout", 900)),
                 )
+                validate_agent_evolution_task(task)
                 memory_uris = _memory_uris(task)
                 return {
                     "session_id": sid,

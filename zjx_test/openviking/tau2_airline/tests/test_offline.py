@@ -13,6 +13,7 @@ from tau2_airline.openviking_adapter import (
     OpenVikingAdapter,
     encode_role_tool_blocks,
     is_memory_type_uri,
+    validate_agent_evolution_task,
 )
 from tau2_airline.pipeline import (
     _cell_runtime_cost,
@@ -81,7 +82,7 @@ def test_protocol_defaults_are_new_step_agent_trajectory_cell():
     assert config["seeds"] == [300, 301, 302, 303]
     assert config["max_steps"] == 200
     assert config["max_retries"] == 0
-    assert config["corpus_revision"] == "hermes-step-agent-trajectory-v3"
+    assert config["corpus_revision"] == "hermes-step-agent-trajectory-v4"
     assert config["search_memory_type"] == "trajectories"
     assert config["train_transcript_format"] == "role_tool_blocks"
     assert config["train_skip_failed_sessions"] is True
@@ -148,6 +149,26 @@ def test_agent_memory_policy_disables_user_memory_and_working_summary():
         "self": {"enabled": True},
         "peer": {"enabled": False},
     }
+
+
+def test_disabled_server_agent_evolution_fails_on_first_commit():
+    with pytest.raises(RuntimeError, match="Agent Evolution is disabled"):
+        validate_agent_evolution_task(
+            {
+                "result": {
+                    "agent_evolution_enabled": False,
+                    "agent_memory_skip_reason": "agent_evolution_disabled",
+                }
+            }
+        )
+    validate_agent_evolution_task(
+        {
+            "result": {
+                "agent_evolution_enabled": True,
+                "agent_memory_skip_reason": None,
+            }
+        }
+    )
 
 
 def test_memory_type_uri_filter_rejects_user_event_false_positive():
