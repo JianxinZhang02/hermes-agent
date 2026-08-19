@@ -278,6 +278,28 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
     return manifest
 
 
+def repair_memory_index(paths: Paths, config: dict[str, Any]) -> dict[str, Any]:
+    """Repair vectors for the already committed corpus without rerunning Build."""
+    paths.corpus.mkdir(parents=True, exist_ok=True)
+    progress_path = paths.corpus / "commit_progress.json"
+    if not progress_path.is_file():
+        raise RuntimeError("Commit progress missing; there is no existing corpus to repair")
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    committed = list(progress.get("committed") or [])
+    if not committed:
+        raise RuntimeError("Commit progress contains no committed trajectories")
+    adapter = OpenVikingAdapter(config)
+    result = adapter.repair_index("trajectories")
+    artifact = {
+        "protocol": config["protocol"],
+        "created_at_unix": time.time(),
+        "committed_count": len(committed),
+        **result,
+    }
+    write_json(paths.corpus / "index_repair.json", artifact)
+    return artifact
+
+
 def audit_memory(paths: Paths, config: dict[str, Any], *, write_artifact: bool = True) -> dict[str, Any]:
     manifest_path = paths.corpus / "corpus_manifest.json"
     if not manifest_path.is_file():

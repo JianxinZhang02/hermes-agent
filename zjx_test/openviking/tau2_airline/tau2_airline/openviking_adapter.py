@@ -388,3 +388,106 @@ class OpenVikingAdapter:
 
     def fingerprint(self) -> dict[str, Any]:
         return self.snapshot("trajectories")
+
+    def repair_index(self, memory_type: str = "trajectories") -> dict[str, Any]:
+        """Repair vectors for existing memory files without recommitting sessions."""
+        target_uri = self._target_uri(memory_type)
+
+        async def discover() -> list[dict[str, Any]]:
+            client = self._async_client()
+            await client.initialize()
+            try:
+                entries = await client.tree(
+                    target_uri,
+                    output="original",
+                    show_all_hidden=False,
+                    node_limit=10000,
+                )
+                leaves: list[dict[str, Any]] = []
+                for entry in list(entries or []):
+                    if not isinstance(entry, dict):
+                        continue
+                    uri = str(entry.get("uri") or "")
+                    is_dir = bool(entry.get("isDir", entry.get("is_dir", False)))
+                    if not uri or is_dir or not uri.endswith(".md"):
+                        continue
+                    text = str(await client.read(uri) or "")
+                    leaves.append({"uri": uri, "text": text})
+                return leaves
+            finally:
+                await client.close()
+
+        leaves = self._run_async(discover)
+        if not leaves:
+            raise RuntimeError(f"No existing {memory_type} files found under {target_uri}")
+        print(f"      repair-index: discovered {len(leaves)} existing {memory_type} files", flush=True)
+
+        async def reindex() -> dict[str, Any]:
+            client = self._async_client()
+            await client.initialize()
+            try:
+                return await client.reindex(
+                    uri=target_uri,
+                    mode="vectors_only",
+                    wait=True,
+                    dry_run=False,
+                )
+            finally:
+                await client.close()
+
+        reindex_result: dict[str, Any] | None = None
+        reindex_error: str | None = None
+        try:
+            reindex_result = self._run_async(reindex)
+        except Exception as exc:
+            reindex_error = f"{type(exc).__name__}: {exc}"
+            print(f"      repair-index: server reindex failed: {reindex_error}", flush=True)
+
+        snapshot = self.snapshot(memory_type)
+        fallback_rewrites = 0
+        fallback_errors: list[dict[str, str]] = []
+        if int(snapshot.get("item_count", 0)) <= 0:
+            async def rewrite_leaves() -> None:
+                nonlocal fallback_rewrites
+                client = self._async_client()
+                await client.initialize()
+                try:
+                    for index, leaf in enumerate(leaves, start=1):
+                        print(
+                            f"      repair-index fallback {index}/{len(leaves)}: {leaf['uri']}",
+                            flush=True,
+                        )
+                        try:
+                            await client.write(
+                                leaf["uri"],
+                                leaf["text"],
+                                mode="replace",
+                                wait=True,
+                                timeout=float(self.config.get("openviking_wait_timeout", 900)),
+                            )
+                            fallback_rewrites += 1
+                        except Exception as exc:
+                            fallback_errors.append(
+                                {"uri": leaf["uri"], "error": f"{type(exc).__name__}: {exc}"}
+                            )
+                finally:
+                    await client.close()
+
+            self._run_async(rewrite_leaves)
+            snapshot = self.snapshot(memory_type)
+
+        result = {
+            "target_uri": target_uri,
+            "discovered_files": len(leaves),
+            "reindex_result": reindex_result,
+            "reindex_error": reindex_error,
+            "fallback_rewrites": fallback_rewrites,
+            "fallback_errors": fallback_errors,
+            "snapshot": snapshot,
+        }
+        if int(snapshot.get("item_count", 0)) <= 0:
+            raise RuntimeError(
+                "OpenViking index repair produced no searchable trajectory: "
+                + json.dumps(result, ensure_ascii=False, default=str)
+            )
+        return result

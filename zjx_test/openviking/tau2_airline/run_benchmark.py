@@ -15,6 +15,7 @@ from tau2_airline.pipeline import (
     build_corpus,
     diagnose_single_tool_execution,
     evaluate,
+    repair_memory_index,
     report,
     smoke_replay,
 )
@@ -25,7 +26,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument(
         "phase",
         choices=[
-            "preflight", "bootstrap", "build", "audit-memory", "diagnose-tools",
+            "preflight", "bootstrap", "build", "repair-index", "audit-memory", "diagnose-tools",
             "smoke", "eval", "report", "all",
         ],
     )
@@ -70,7 +71,7 @@ def main() -> int:
     args = parser().parse_args()
     cfg = runtime_config(args)
     paths = resolve_paths(args)
-    need_ov = args.phase in {"build", "audit-memory", "smoke", "eval", "all"} and not args.offline
+    need_ov = args.phase in {"build", "repair-index", "audit-memory", "smoke", "eval", "all"} and not args.offline
     require_runtime(paths, need_openviking=need_ov)
     llm_phases = {"bootstrap", "build", "smoke", "eval", "all"}
     if args.phase in llm_phases and not cfg.get("agent_api_key") and not args.offline:
@@ -101,6 +102,14 @@ def main() -> int:
     if args.phase in {"build", "all"}:
         result = build_corpus(paths, cfg, force=args.force)
         print(f"PASS build: committed {result['committed_count']} successful training trajectories")
+    if args.phase == "repair-index":
+        result = repair_memory_index(paths, cfg)
+        print(
+            "PASS repair-index: "
+            f"files={result['discovered_files']} "
+            f"searchable={result['snapshot']['item_count']} "
+            f"fallback_rewrites={result['fallback_rewrites']}"
+        )
     if args.phase == "audit-memory":
         result = audit_memory(paths, cfg)
         print(
