@@ -154,6 +154,22 @@ def _match_value(match: Any, key: str, default: Any = None) -> Any:
     return getattr(match, key, default)
 
 
+def _is_detail_memory_leaf(match: Any, memory_type: str) -> bool:
+    uri = str(_match_value(match, "uri", "") or "")
+    if not is_memory_type_uri(uri, memory_type):
+        return False
+    name = uri.rsplit("/", 1)[-1]
+    if not name or name.startswith(".") or not name.endswith(".md"):
+        return False
+    level = _match_value(match, "level")
+    if level is None:
+        return True
+    try:
+        return int(level) == 2
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_agent_evolution_task(task: dict[str, Any]) -> None:
     """Fail immediately when the server archived a session without Agent Memory."""
     result = task.get("result") or {}
@@ -276,7 +292,7 @@ class OpenVikingAdapter:
                     retrieval_method = "find_fallback"
                 for match in matches:
                     uri = str(_match_value(match, "uri", "") or "")
-                    if not is_memory_type_uri(uri, memory_type):
+                    if not _is_detail_memory_leaf(match, memory_type):
                         continue
                     self.read_count += 1
                     try:

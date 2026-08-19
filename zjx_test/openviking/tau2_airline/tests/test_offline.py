@@ -11,6 +11,7 @@ from tau2_airline.hermes_agent import HermesTau2StepRuntime, _system_prompt
 from tau2_airline.openviking_adapter import (
     AGENT_MEMORY_POLICY,
     OpenVikingAdapter,
+    _is_detail_memory_leaf,
     _match_value,
     _result_memories,
     encode_role_tool_blocks,
@@ -53,6 +54,15 @@ def test_http_search_dict_and_embedded_object_results_are_both_supported():
     assert _result_memories(SimpleNamespace(memories=[SimpleNamespace(uri="object")]))[0].uri == "object"
     assert _match_value(row, "uri") == row["uri"]
     assert _match_value(SimpleNamespace(score=0.8), "score") == 0.8
+
+
+def test_trajectory_retrieval_excludes_directory_markers_and_non_detail_levels():
+    root = "viking://user/alice/memories/trajectories"
+    assert _is_detail_memory_leaf({"uri": f"{root}/case.md", "level": 2}, "trajectories")
+    assert not _is_detail_memory_leaf(
+        {"uri": f"{root}/.overview.md", "level": 1}, "trajectories"
+    )
+    assert not _is_detail_memory_leaf({"uri": f"{root}/case.md", "level": 1}, "trajectories")
 
 
 class FakeMemory:
