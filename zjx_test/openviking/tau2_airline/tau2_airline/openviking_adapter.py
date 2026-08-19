@@ -245,7 +245,24 @@ class OpenVikingAdapter:
                     target_uri=self._target_uri(memory_type),
                     limit=max(limit, 1),
                 )
-                for match in list(getattr(search_result, "memories", []) or []):
+                matches = list(getattr(search_result, "memories", []) or [])
+                retrieval_method = "search"
+                if not matches:
+                    # OpenViking 0.4.12 can return an empty hierarchical search
+                    # even after a clean 36/36 leaf + 2 directory-vector rebuild.
+                    # Fall back to its direct vector API; retain provenance so
+                    # reports do not mislabel this as the official high-level path.
+                    find_result = await client.find(
+                        query=query,
+                        target_uri=self._target_uri(memory_type),
+                        limit=max(limit, 1),
+                        score_threshold=0.0,
+                        context_type="memory",
+                        level=[2],
+                    )
+                    matches = list(getattr(find_result, "memories", []) or [])
+                    retrieval_method = "find_fallback"
+                for match in matches:
                     uri = str(getattr(match, "uri", "") or "")
                     if not is_memory_type_uri(uri, memory_type):
                         continue
@@ -270,6 +287,7 @@ class OpenVikingAdapter:
                         "text_chars": len(text),
                         "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                         "injected": injected,
+                        "retrieval_method": retrieval_method,
                     }
                     if memory_type == "trajectories":
                         required = ("- Domain:", "- Trigger:", "- Procedure:", "- Result:")
@@ -367,6 +385,9 @@ class OpenVikingAdapter:
                 if row.get("uri"):
                     by_uri[str(row["uri"])] = row
         items = [by_uri[uri] for uri in sorted(by_uri)]
+        retrieval_methods = sorted(
+            {str(item.get("retrieval_method")) for item in items if item.get("retrieval_method")}
+        )
         canonical_items = [
             {
                 "uri": item.get("uri"),
@@ -381,6 +402,7 @@ class OpenVikingAdapter:
             "kind": "strict_memory_type_retrieval_snapshot",
             "memory_type": memory_type,
             "search_uri": self._target_uri(memory_type),
+            "retrieval_methods": retrieval_methods,
             "item_count": len(items),
             "items": items,
             "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
