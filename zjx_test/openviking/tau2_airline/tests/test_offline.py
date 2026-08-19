@@ -15,6 +15,7 @@ from tau2_airline.openviking_adapter import (
     _match_value,
     _result_memories,
     encode_role_tool_blocks,
+    configured_search_memory_type,
     is_memory_type_uri,
     validate_agent_evolution_task,
 )
@@ -107,6 +108,13 @@ def test_protocol_defaults_are_new_step_agent_trajectory_cell():
     assert config["search_memory_type"] == "trajectories"
     assert config["train_transcript_format"] == "role_tool_blocks"
     assert config["train_skip_failed_sessions"] is True
+
+
+def test_search_memory_type_is_validated_and_not_inferred_from_uri():
+    assert configured_search_memory_type({"search_memory_type": "experiences"}) == "experiences"
+    assert configured_search_memory_type({"search_memory_type": "trajectories"}) == "trajectories"
+    with pytest.raises(ValueError, match="search_memory_type"):
+        configured_search_memory_type({"search_memory_type": "events"})
 
 
 def test_confirmation_aware_rule_accepts_upstream_and_wrapped_appendix():
@@ -291,6 +299,34 @@ def test_prewrite_recall_discards_candidate_and_regenerates_without_execution(tm
     assert trace["prewrite_retrieval"]["regenerated"] is True
 
 
+def test_prewrite_recall_uses_configured_experience_type(tmp_path):
+    tool = FakeTool()
+    runtime = HermesTau2StepRuntime(
+        tools=[tool],
+        domain_policy="policy",
+        task_id="8",
+        config={"prewrite_top_k": 2, "search_memory_type": "experiences"},
+        hermes_repo=tmp_path,
+        memory_enabled=False,
+        trace_dir=tmp_path,
+    )
+    runtime.memory = FakeMemory(block="")
+    runtime.history = [{"role": "user", "content": "Book my current request"}]
+    trace = {
+        "usage_delta": {key: 0 for key in runtime.usage},
+        "api_calls": 1,
+        "model_latency_sec": 0.1,
+    }
+    _, calls, result = runtime._apply_prewrite_recall(
+        "",
+        [{"id": "c", "name": tool.name, "arguments": {"id": "current"}}],
+        trace,
+    )
+    assert calls[0]["name"] == tool.name
+    assert runtime.memory.queries[0][2] == "experiences"
+    assert result["prewrite_retrieval"]["memory_type"] == "experiences"
+
+
 def test_tau_tool_result_is_appended_and_unknown_ids_fail(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.pending_calls["call-1"] = {
@@ -345,6 +381,59 @@ def test_audit_memory_requires_frozen_valid_trajectory_snapshot(monkeypatch, tmp
 
     monkeypatch.setattr("tau2_airline.pipeline.OpenVikingAdapter", Adapter)
     assert audit_memory(paths, config)["verified"] is True
+
+
+def test_audit_memory_can_select_frozen_experience_snapshot(monkeypatch, tmp_path):
+    run_dir = tmp_path / "run"
+    paths = Paths(tmp_path, tmp_path, run_dir)
+    saved_config = {
+        "openviking_url": "http://127.0.0.1:1933",
+        "openviking_account": "a",
+        "openviking_user": "u",
+        "search_uri": "viking://user/memories/trajectories",
+        "corpus_revision": "v4",
+    }
+    config = {
+        **saved_config,
+        "search_uri": "viking://user/memories/experiences",
+        "search_memory_type": "experiences",
+    }
+    trajectory = {"item_count": 1, "sha256": "t", "items": [{"text_chars": 10}]}
+    experience = {
+        "item_count": 1,
+        "sha256": "e",
+        "search_uri": "viking://user/memories/experiences",
+        "items": [
+            {
+                "uri": "viking://user/u/memories/experiences/policy.md",
+                "text_chars": 100,
+            }
+        ],
+    }
+    write_json(
+        paths.corpus / "corpus_manifest.json",
+        {
+            "config": saved_config,
+            "trajectory_snapshot": trajectory,
+            "experience_snapshot": experience,
+        },
+    )
+
+    class Adapter:
+        write_count = 0
+        session_commit_count = 0
+
+        def __init__(self, _config):
+            pass
+
+        def snapshot(self, kind):
+            return trajectory if kind == "trajectories" else experience
+
+    monkeypatch.setattr("tau2_airline.pipeline.OpenVikingAdapter", Adapter)
+    result = audit_memory(paths, config)
+    assert result["verified"] is True
+    assert result["search_memory_type"] == "experiences"
+    assert result["selected_memory_snapshot"] == experience
 
 
 def test_invalid_cached_cell_is_costed_and_quarantined(tmp_path):
@@ -428,8 +517,14 @@ def test_targeted_cell_repair_preserves_successful_simulations(tmp_path, monkeyp
 
 
 def test_baseline_prompt_contains_no_retrieved_memory():
-    prompt = _system_prompt("POLICY", "SCOPE", None)
+    prompt = _system_prompt("POLICY", "SCOPE", None, "trajectories")
     assert "No OpenViking experience memory is enabled" in prompt
+
+
+def test_experience_prompt_is_not_mislabeled_as_trajectory():
+    prompt = _system_prompt("POLICY", "SCOPE", "policy memory", "experiences")
+    assert "generalized agent experiences" in prompt
+    assert "task-execution trajectories" not in prompt
 
 
 def test_secrets_are_not_persisted_in_public_config():
@@ -497,6 +592,6 @@ def test_report_builds_paired_step_adapter_metrics(tmp_path):
     )
     summary = report(Paths(tmp_path, tmp_path, run_dir))
     assert summary["delta_accuracy_pp"] == 100.0
-    assert summary["arms"]["openviking"]["tool_calls"] == 1
-    assert summary["arms"]["openviking"]["tokens"]["total_tokens"] == 12
+    assert summary["arms"]["trajectory_memory"]["tool_calls"] == 1
+    assert summary["arms"]["trajectory_memory"]["tokens"]["total_tokens"] == 12
     assert summary["paired"] == {"wins": 1, "losses": 0, "ties": 0, "pair_count": 1}

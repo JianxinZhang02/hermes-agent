@@ -10,8 +10,53 @@ from types import SimpleNamespace
 from typing import Any
 
 from .config import Paths, git_sha, sha256_json, write_json
-from .openviking_adapter import OpenVikingAdapter
+from .openviking_adapter import OpenVikingAdapter, configured_search_memory_type
 from .tau2_runtime import add_tau2_to_path, build_fixture, run_cell
+
+
+MEMORY_ARM_TYPES = {
+    "trajectory_memory": "trajectories",
+    "experience_memory": "experiences",
+}
+
+
+def _memory_arm(memory_type: str) -> str:
+    return next(arm for arm, candidate in MEMORY_ARM_TYPES.items() if candidate == memory_type)
+
+
+def _normalize_arm(arm: str) -> str:
+    # Compatibility with cells/manifests produced before memory types became explicit.
+    return "trajectory_memory" if arm == "openviking" else arm
+
+
+def _config_for_memory_type(config: dict[str, Any], memory_type: str) -> dict[str, Any]:
+    selected = dict(config)
+    selected["search_memory_type"] = memory_type
+    uri = str(selected["search_uri"]).rstrip("/")
+    marker = "/memories/"
+    if marker in uri:
+        uri = f"{uri.split(marker, 1)[0]}{marker}{memory_type}"
+    selected["search_uri"] = uri
+    return selected
+
+
+def _validate_memory_snapshot(memory_type: str, snapshot: dict[str, Any]) -> None:
+    items = snapshot.get("items") or []
+    if not items:
+        raise RuntimeError(
+            f"No readable {memory_type} memory is available; refusing model calls"
+        )
+    invalid = (
+        [item for item in items if not item.get("contract_valid")]
+        if memory_type == "trajectories"
+        else []
+    )
+    unreadable = [item for item in items if item.get("read_error") or not item.get("text_chars")]
+    if invalid or unreadable:
+        raise RuntimeError(
+            f"{memory_type} corpus contains invalid or unreadable records: "
+            + json.dumps({"invalid": invalid, "unreadable": unreadable}, ensure_ascii=False)
+        )
 
 
 def _reward(sim: dict[str, Any]) -> float:
@@ -226,7 +271,7 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         saved = existing.get("config") or {}
         identity_keys = (
-            "openviking_account", "openviking_user", "search_uri", "corpus_revision"
+            "openviking_url", "openviking_account", "openviking_user", "corpus_revision"
         )
         mismatches = {
             key: {"saved": saved.get(key), "current": config.get(key)}
@@ -334,9 +379,14 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
     print("      all successful trajectories committed; verifying retrieval fingerprint", flush=True)
     trajectories = adapter.snapshot("trajectories")
     experiences = adapter.snapshot("experiences")
-    if int(trajectories.get("item_count", 0)) <= 0:
+    selected_type = configured_search_memory_type(config)
+    selected_snapshot = {
+        "trajectories": trajectories,
+        "experiences": experiences,
+    }[selected_type]
+    if int(selected_snapshot.get("item_count", 0)) <= 0:
         raise RuntimeError(
-            "OpenViking accepted the successful train sessions but no trajectory URI "
+            f"OpenViking accepted the successful train sessions but no {selected_type} URI "
             "is searchable; do not start eval"
         )
     manifest = {
@@ -357,7 +407,8 @@ def build_corpus(paths: Paths, config: dict[str, Any], *, force: bool = False) -
         "memory_policy": committed[0].get("memory_policy"),
         "trajectory_snapshot": trajectories,
         "experience_snapshot": experiences,
-        "fingerprint": trajectories,
+        "fingerprint": selected_snapshot,
+        "build_search_memory_type": selected_type,
         "hermes_commit": git_sha(paths.hermes_repo),
         "tau2_commit": git_sha(paths.tau2_repo),
         "config": _public_config(config),
@@ -377,14 +428,16 @@ def repair_memory_index(paths: Paths, config: dict[str, Any]) -> dict[str, Any]:
     if not committed:
         raise RuntimeError("Commit progress contains no committed trajectories")
     adapter = OpenVikingAdapter(config)
-    result = adapter.repair_index("trajectories")
+    memory_type = configured_search_memory_type(config)
+    result = adapter.repair_index(memory_type)
     artifact = {
         "protocol": config["protocol"],
         "created_at_unix": time.time(),
         "committed_count": len(committed),
+        "search_memory_type": memory_type,
         **result,
     }
-    write_json(paths.corpus / "index_repair.json", artifact)
+    write_json(paths.corpus / f"index_repair_{memory_type}.json", artifact)
     return artifact
 
 
@@ -394,7 +447,7 @@ def audit_memory(paths: Paths, config: dict[str, Any], *, write_artifact: bool =
         raise RuntimeError("Corpus manifest missing; run build first")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     saved_config = manifest.get("config") or {}
-    for key in ("openviking_url", "openviking_account", "openviking_user", "search_uri", "corpus_revision"):
+    for key in ("openviking_url", "openviking_account", "openviking_user", "corpus_revision"):
         if str(saved_config.get(key)) != str(config.get(key)):
             raise RuntimeError(
                 f"OpenViking corpus identity mismatch for {key}: "
@@ -403,16 +456,12 @@ def audit_memory(paths: Paths, config: dict[str, Any], *, write_artifact: bool =
     adapter = OpenVikingAdapter(config)
     trajectories = adapter.snapshot("trajectories")
     experiences = adapter.snapshot("experiences")
-    items = trajectories.get("items") or []
-    if not items:
-        raise RuntimeError("No readable trajectory memory is available; refusing model calls")
-    invalid = [item for item in items if not item.get("contract_valid")]
-    unreadable = [item for item in items if item.get("read_error") or not item.get("text_chars")]
-    if invalid or unreadable:
-        raise RuntimeError(
-            "Trajectory corpus contains invalid or unreadable records: "
-            + json.dumps({"invalid": invalid, "unreadable": unreadable}, ensure_ascii=False)
-        )
+    selected_type = configured_search_memory_type(config)
+    selected_snapshot = {
+        "trajectories": trajectories,
+        "experiences": experiences,
+    }[selected_type]
+    _validate_memory_snapshot(selected_type, selected_snapshot)
     built_trajectories = manifest.get("trajectory_snapshot") or manifest.get("fingerprint") or {}
     built_experiences = manifest.get("experience_snapshot") or {
         "item_count": 0,
@@ -425,8 +474,11 @@ def audit_memory(paths: Paths, config: dict[str, Any], *, write_artifact: bool =
     result = {
         "verified_at_unix": time.time(),
         "identity": {key: config.get(key) for key in (
-            "openviking_url", "openviking_account", "openviking_user", "search_uri", "corpus_revision"
+            "openviking_url", "openviking_account", "openviking_user", "corpus_revision"
         )},
+        "search_memory_type": selected_type,
+        "search_uri": selected_snapshot.get("search_uri"),
+        "selected_memory_snapshot": selected_snapshot,
         "trajectory_snapshot": trajectories,
         "experience_snapshot": experiences,
         "openviking_write_operations": adapter.write_count,
@@ -434,11 +486,17 @@ def audit_memory(paths: Paths, config: dict[str, Any], *, write_artifact: bool =
         "verified": True,
     }
     if write_artifact:
-        write_json(paths.run_dir / "memory_audit_manifest.json", result)
+        write_json(paths.run_dir / f"memory_audit_manifest_{selected_type}.json", result)
     return result
 
 
-def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+def evaluate(
+    paths: Paths,
+    config: dict[str, Any],
+    *,
+    force: bool = False,
+    arm: str | None = None,
+) -> dict[str, Any]:
     corpus_manifest = paths.corpus / "corpus_manifest.json"
     if not corpus_manifest.is_file():
         raise RuntimeError("Corpus manifest missing; run build first")
@@ -449,10 +507,50 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
     adapter = OpenVikingAdapter(config)
     before_trajectories = audit["trajectory_snapshot"]
     before_experiences = audit["experience_snapshot"]
-    cells = []
+    selected_type = configured_search_memory_type(config)
+    if arm == "all":
+        requested_arms = ["no_memory", "trajectory_memory", "experience_memory"]
+    elif arm:
+        requested_arms = [_normalize_arm(arm)]
+    else:
+        requested_arms = ["no_memory", _memory_arm(selected_type)]
+    for requested_arm in requested_arms:
+        requested_type = MEMORY_ARM_TYPES.get(requested_arm)
+        if requested_type:
+            _validate_memory_snapshot(
+                requested_type,
+                {
+                    "trajectories": before_trajectories,
+                    "experiences": before_experiences,
+                }[requested_type],
+            )
+
+    manifest_path = paths.run_dir / "eval_manifest.json"
+    cells_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    if manifest_path.is_file():
+        existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for cell in existing_manifest.get("cells") or []:
+            normalized_arm = _normalize_arm(str(cell.get("arm") or ""))
+            cell_path = Path(str(cell.get("path") or ""))
+            if normalized_arm and cell_path.is_file():
+                normalized = dict(cell)
+                normalized["arm"] = normalized_arm
+                cells_by_key[(normalized_arm, int(cell["seed"]))] = normalized
+
     for seed in config["seeds"]:
-        for arm, memory_enabled in (("no_memory", False), ("openviking", True)):
-            output = paths.cells / f"airline_{arm}_seed{seed}.json"
+        for current_arm in requested_arms:
+            memory_type = MEMORY_ARM_TYPES.get(current_arm)
+            memory_enabled = memory_type is not None
+            cell_config = (
+                _config_for_memory_type(config, memory_type)
+                if memory_type
+                else dict(config)
+            )
+            if current_arm == "trajectory_memory":
+                legacy = paths.cells / f"airline_openviking_seed{seed}.json"
+                output = legacy if legacy.is_file() else paths.cells / f"airline_{current_arm}_seed{seed}.json"
+            else:
+                output = paths.cells / f"airline_{current_arm}_seed{seed}.json"
             if output.is_file() and not force:
                 cached = json.loads(output.read_text(encoding="utf-8"))
                 cached_infrastructure_errors = _infrastructure_error_count(cached)
@@ -474,7 +572,7 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
                 run_cell(
                     tau2_repo=paths.tau2_repo,
                     hermes_repo=paths.hermes_repo,
-                    config=config,
+                    config=cell_config,
                     output=output,
                     split=config["eval_split"],
                     num_tasks=int(config["eval_tasks"]),
@@ -491,7 +589,7 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
             if infrastructure_errors:
                 data = _repair_infrastructure_errors(
                     paths=paths,
-                    config=config,
+                    config=cell_config,
                     output=output,
                     data=data,
                     seed=int(seed),
@@ -518,7 +616,18 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
                     f"Hermes executed {len(hermes_executions)} TAU business tools; "
                     "TAU-2 must be the sole executor"
                 )
-            cells.append({"arm": arm, "seed": seed, "path": str(output), "simulations": len(simulations)})
+            cells_by_key[(current_arm, int(seed))] = {
+                "arm": current_arm,
+                "memory_type": memory_type,
+                "seed": seed,
+                "path": str(output),
+                "simulations": len(simulations),
+            }
+    arm_order = {"no_memory": 0, "trajectory_memory": 1, "experience_memory": 2}
+    cells = sorted(
+        cells_by_key.values(),
+        key=lambda row: (arm_order.get(str(row["arm"]), 99), int(row["seed"])),
+    )
     after_trajectories = adapter.snapshot("trajectories")
     after_experiences = adapter.snapshot("experiences")
     if before_trajectories["sha256"] != after_trajectories["sha256"]:
@@ -528,8 +637,10 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
     manifest = {
         "protocol": config["protocol"],
         "cells": cells,
-        "expected_cell_count": len(config["seeds"]) * 2,
-        "expected_simulation_count": len(config["seeds"]) * 2 * int(config["eval_tasks"]),
+        "requested_arms": requested_arms,
+        "available_arms": sorted({str(cell["arm"]) for cell in cells}),
+        "expected_cell_count": len(cells),
+        "expected_simulation_count": sum(int(cell["simulations"]) for cell in cells),
         "fixed_first_user_fixture_sha256": sha256_json(
             json.loads(paths.fixture.read_text(encoding="utf-8"))
         ),
@@ -541,7 +652,7 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
         "openviking_eval_write_operations": 0,
         "read_only_verified": True,
     }
-    write_json(paths.run_dir / "eval_manifest.json", manifest)
+    write_json(manifest_path, manifest)
     return manifest
 
 
@@ -557,7 +668,9 @@ def smoke_replay(paths: Paths, config: dict[str, Any]) -> dict[str, Any]:
     adapter = OpenVikingAdapter(config)
     before_trajectories = audit["trajectory_snapshot"]
     before_experiences = audit["experience_snapshot"]
-    output = paths.run_dir / "smoke" / "airline_openviking_seed300_task8.json"
+    memory_type = configured_search_memory_type(config)
+    arm = _memory_arm(memory_type)
+    output = paths.run_dir / "smoke" / f"airline_{arm}_seed300_task8.json"
     run_cell(
         tau2_repo=paths.tau2_repo,
         hermes_repo=paths.hermes_repo,
@@ -610,7 +723,8 @@ def smoke_replay(paths: Paths, config: dict[str, Any]) -> dict[str, Any]:
                 {
                     "infrastructure_errors": infrastructure_errors,
                     "hermes_tool_executions": len(hermes_executions),
-                    "first_user_trajectory_injections": first_hits,
+                    "first_user_memory_injections": first_hits,
+                    "search_memory_type": memory_type,
                     "openviking_writes": writes,
                     "trajectory_snapshot_unchanged": (
                         before_trajectories["sha256"] == after_trajectories["sha256"]
@@ -626,16 +740,17 @@ def smoke_replay(paths: Paths, config: dict[str, Any]) -> dict[str, Any]:
         )
     result = {
         "task_id": "8",
-        "arm": "openviking",
+        "arm": arm,
+        "search_memory_type": memory_type,
         "seed": 300,
         "reward": _reward(simulations[0]),
         "cost": _cell_runtime_cost(data),
         "read_only_verified": True,
         "adapter": "hermes_configured_external_step_adapter",
         "hermes_tool_executions": 0,
-        "first_user_trajectory_injections": first_hits,
+        "first_user_memory_injections": first_hits,
     }
-    write_json(paths.run_dir / "smoke_replay_manifest.json", result)
+    write_json(paths.run_dir / f"smoke_replay_manifest_{memory_type}.json", result)
     return result
 
 
@@ -805,7 +920,7 @@ def report(paths: Paths) -> dict[str, Any]:
     injected_by_task: list[dict[str, Any]] = []
     for cell in manifest["cells"]:
         data = json.loads(Path(cell["path"]).read_text(encoding="utf-8"))
-        arm = cell["arm"]
+        arm = _normalize_arm(str(cell["arm"]))
         bucket = arms.setdefault(
             arm,
             {"rewards": [], "db": [], "durations": [], "reward_components": {}, "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}, "tool_calls": 0, "prewrite_attempts": 0, "prewrite_injections": 0, "first_recall_attempts": 0, "first_user_injections": 0, "hermes_api_calls": 0, "hermes_latency_sec": 0.0, "openviking_retrieval_latency_sec": 0.0, "hermes_business_tool_executions": 0, "agent_cost": 0.0, "user_cost": 0.0},
@@ -850,10 +965,11 @@ def report(paths: Paths) -> dict[str, Any]:
             injected_by_task.append(
                 {
                     "arm": arm,
+                    "memory_type": MEMORY_ARM_TYPES.get(arm),
                     "seed": int(cell["seed"]),
                     "task_id": str(sim.get("task_id")),
-                    "first_user_trajectory_uris": sorted(set(first_uris)),
-                    "prewrite_trajectory_uris": sorted(set(prewrite_uris)),
+                    "first_user_memory_uris": sorted(set(first_uris)),
+                    "prewrite_memory_uris": sorted(set(prewrite_uris)),
                 }
             )
             paired.setdefault((int(cell["seed"]), str(sim.get("task_id"))), {})[arm] = reward
@@ -868,7 +984,7 @@ def report(paths: Paths) -> dict[str, Any]:
             "trajectory_count": (corpus_manifest.get("trajectory_snapshot") or {}).get("item_count", 0),
             "experience_count": (corpus_manifest.get("experience_snapshot") or {}).get("item_count", 0),
         },
-        "injected_trajectory_uris_by_task": injected_by_task,
+        "injected_memory_uris_by_task": injected_by_task,
         "arms": {},
     }
     for arm, bucket in arms.items():
@@ -899,19 +1015,37 @@ def report(paths: Paths) -> dict[str, Any]:
             ),
             "average_agent_tokens": bucket["tokens"]["total_tokens"] / count if count else 0.0,
         }
-    wins = losses = ties = 0
-    for row in paired.values():
-        if set(row) != {"no_memory", "openviking"}:
-            continue
-        delta = row["openviking"] - row["no_memory"]
-        wins += delta > 0
-        losses += delta < 0
-        ties += delta == 0
-    summary["paired"] = {"wins": wins, "losses": losses, "ties": ties, "pair_count": wins + losses + ties}
-    if set(summary["arms"]) == {"no_memory", "openviking"}:
-        summary["delta_accuracy_pp"] = 100 * (
-            summary["arms"]["openviking"]["task_success_rate"]
-            - summary["arms"]["no_memory"]["task_success_rate"]
-        )
+    paired_comparisons: dict[str, dict[str, Any]] = {}
+    for memory_arm in MEMORY_ARM_TYPES:
+        wins = losses = ties = 0
+        for row in paired.values():
+            if "no_memory" not in row or memory_arm not in row:
+                continue
+            delta = row[memory_arm] - row["no_memory"]
+            wins += delta > 0
+            losses += delta < 0
+            ties += delta == 0
+        if wins + losses + ties:
+            paired_comparisons[memory_arm] = {
+                "wins": wins,
+                "losses": losses,
+                "ties": ties,
+                "pair_count": wins + losses + ties,
+                "delta_accuracy_pp": 100 * (
+                    summary["arms"][memory_arm]["task_success_rate"]
+                    - summary["arms"]["no_memory"]["task_success_rate"]
+                ),
+            }
+    summary["paired_comparisons"] = paired_comparisons
+    # Keep the legacy fields pinned to the historical trajectory comparison.
+    # If only one memory arm exists, expose that one for older report consumers.
+    legacy = paired_comparisons.get("trajectory_memory")
+    if legacy is None and len(paired_comparisons) == 1:
+        legacy = next(iter(paired_comparisons.values()))
+    if legacy is not None:
+        summary["paired"] = {
+            key: legacy[key] for key in ("wins", "losses", "ties", "pair_count")
+        }
+        summary["delta_accuracy_pp"] = legacy["delta_accuracy_pp"]
     write_json(paths.run_dir / "scoreboard.json", summary)
     return summary

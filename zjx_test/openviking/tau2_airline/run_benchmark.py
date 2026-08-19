@@ -38,6 +38,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--openviking-account")
     p.add_argument("--openviking-user")
     p.add_argument("--search-uri")
+    p.add_argument(
+        "--arm",
+        choices=["all", "no_memory", "trajectory_memory", "experience_memory"],
+        help=(
+            "Eval arm to run. A single arm is merged into the existing eval manifest; "
+            "trajectory_memory and experience_memory also select the corresponding "
+            "memory type for repair/audit/smoke."
+        ),
+    )
     p.add_argument("--agent-model")
     p.add_argument("--user-model")
     p.add_argument("--force", action="store_true")
@@ -51,6 +60,17 @@ def runtime_config(args: argparse.Namespace) -> dict:
         value = getattr(args, attr)
         if value:
             cfg[attr] = value
+    arm_memory_types = {
+        "trajectory_memory": "trajectories",
+        "experience_memory": "experiences",
+    }
+    if args.arm in arm_memory_types:
+        memory_type = arm_memory_types[args.arm]
+        cfg["search_memory_type"] = memory_type
+        uri = str(cfg["search_uri"]).rstrip("/")
+        marker = "/memories/"
+        if marker in uri:
+            cfg["search_uri"] = f"{uri.split(marker, 1)[0]}{marker}{memory_type}"
     cfg["agent_api_key"] = os.environ.get("HERMES_AGENT_API_KEY") or os.environ.get("OPENAI_API_KEY")
     cfg["agent_base_url"] = os.environ.get("HERMES_AGENT_BASE_URL") or os.environ.get("OPENAI_API_BASE") or "https://api.deepseek.com/v1"
     cfg["agent_provider"] = os.environ.get("HERMES_AGENT_PROVIDER", "openai")
@@ -83,6 +103,7 @@ def main() -> int:
     print(f"  TAU-2 source:  {paths.tau2_repo}")
     print(f"  run directory: {paths.run_dir}")
     print(f"  OpenViking:    {cfg['openviking_url']} (contacted in build/audit/smoke/eval)")
+    print(f"  Search memory: {cfg.get('search_memory_type', 'trajectories')}")
     if args.phase == "preflight":
         if not args.offline:
             import inspect
@@ -130,8 +151,11 @@ def main() -> int:
             f"cost={json.dumps(result['cost'], ensure_ascii=False, sort_keys=True)}"
         )
     if args.phase in {"eval", "all"}:
-        result = evaluate(paths, cfg, force=args.force)
-        print(f"PASS eval: {result['expected_simulation_count']} paired simulations; read-only verified")
+        result = evaluate(paths, cfg, force=args.force, arm=args.arm)
+        print(
+            f"PASS eval: {result['expected_simulation_count']} available simulations across "
+            f"{len(result['available_arms'])} arm(s); read-only verified"
+        )
     if args.phase in {"report", "all"}:
         result = report(paths)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

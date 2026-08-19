@@ -5,7 +5,8 @@
 实验比较两组：
 
 - `no_memory`：由当前源码 Hermes `AIAgent` 初始化模型客户端与请求配置、benchmark Step Adapter 驱动的 TAU-2 Airline Agent，不使用跨任务记忆；
-- `openviking`：同一个 Hermes Agent、同一组 Airline 工具，再加入 OpenViking trajectory memory。
+- `trajectory_memory`：同一个 Hermes Agent、同一组 Airline 工具，加入 OpenViking trajectory memory。
+- `experience_memory`：复用同一冻结 corpus，改为加入 OpenViking generalized experience memory。
 
 两组固定使用相同的 test split、4 个种子 `300..303`、每个种子 20 个任务、相同首条用户消息、相同 User Simulator、`temperature=0` 和最多 200 steps。总计 160 个评测 simulation。
 
@@ -94,12 +95,43 @@ python run_benchmark.py diagnose-tools --run-dir "$RUN_DIR"
 # 只跑 seed300/task8；audit 会在任何 Agent LLM 调用前执行
 python run_benchmark.py smoke --run-dir "$RUN_DIR"
 
-# 冻结 corpus，运行 2 arms × 4 seeds × 20 test tasks
+# 冻结 corpus，默认运行 no_memory + 配置所选 Memory arm
 python run_benchmark.py eval --run-dir "$RUN_DIR"
 
 # 只读取已有 artifact 统计
 python run_benchmark.py report --run-dir "$RUN_DIR"
 ```
+
+### 在同一冻结语料上补跑 Experience Memory
+
+Build 已同时产出且冻结 `trajectories` 与 `experiences` 时，不要再次运行 bootstrap/build。
+下面的命令复用同一 fixture、account、user 和 corpus，只新增
+`experience_memory` 的四个 seed；原来的 `no_memory` 与旧 `openviking`
+trajectory cell 会分别作为 `no_memory`、`trajectory_memory` 保留：
+
+```bash
+python run_benchmark.py audit-memory \
+  --run-dir "$RUN_DIR" \
+  --arm experience_memory
+
+python run_benchmark.py smoke \
+  --run-dir "$RUN_DIR" \
+  --arm experience_memory
+
+python run_benchmark.py eval \
+  --run-dir "$RUN_DIR" \
+  --arm experience_memory
+
+python run_benchmark.py report --run-dir "$RUN_DIR"
+```
+
+只有第一条 `audit-memory` 报告 Experience 索引不可检索时，才先执行
+`repair-index --arm experience_memory`，然后重新审计；正常已有可检索的 10 条
+Experience 不需要修复索引。
+
+若希望从空的 eval cells 一次运行三组，可使用 `eval --arm all`。三组名称固定为
+`no_memory`、`trajectory_memory`、`experience_memory`；检索类型来自配置/CLI，
+不会再由 Prompt、审计或运行时代码写死。
 
 也可以执行 `all`，但分阶段更容易确认 corpus build 与只读 eval 的边界。`--force` 会重新生成对应阶段，请谨慎使用 build 的 `--force`，它会再次向同一 OpenViking scope 提交训练会话。更稳妥的做法是为新实验设置新的 `--openviking-user` 与 `--search-uri`。
 
@@ -122,7 +154,7 @@ trajectory URI 与冻结内容 hash 均通过后才能进入 smoke/eval。
 - `fixed_first_user_fixture.json`：按 scenario SHA 固定首条用户消息；
 - `corpus/train_results.json`：Hermes 训练任务原始 TAU-2 结果；
 - `corpus/corpus_manifest.json`：成功轨迹、commit task、源码 commit 与冻结指纹；
-- `memory_audit_manifest.json`：trajectory/experience URI、内容 hash、结构与只读检查；
+- `memory_audit_manifest_{trajectories|experiences}.json`：所选类型及两类冻结 URI、内容 hash、结构与只读检查；
 - `zero_token_tool_diagnostic.json`：task8 初始 3 座、2 人预订及 TAU 单次执行审计；
 - `cells/*.json`：每个 arm/seed 的 20 个 simulation；
 - `eval_manifest.json`：覆盖数量、首句 fixture hash、eval 前后 fingerprint、零写审计；

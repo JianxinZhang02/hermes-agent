@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .openviking_adapter import OpenVikingAdapter
+from .openviking_adapter import OpenVikingAdapter, configured_search_memory_type
 
 
 WRITE_PREFIX_DEFAULTS = (
@@ -22,14 +22,27 @@ def _role(message: Any) -> str:
     return str(getattr(value, "value", value))
 
 
-def _system_prompt(policy: str, memory_scope: str, memory_block: str | None) -> str:
+def _memory_label(memory_type: str) -> str:
+    return {
+        "trajectories": "task-execution trajectories",
+        "experiences": "generalized agent experiences",
+    }[memory_type]
+
+
+def _system_prompt(
+    policy: str,
+    memory_scope: str,
+    memory_block: str | None,
+    memory_type: str,
+) -> str:
+    label = _memory_label(memory_type)
     memory = (
         "No OpenViking experience memory is enabled for this arm."
         if memory_block is None
         else (
-            "No OpenViking trajectory matched the first user request."
+            f"No OpenViking {label} matched the first user request."
             if not memory_block.strip()
-            else "Use these OpenViking trajectories only when relevant:\n\n" + memory_block
+            else f"Use these OpenViking {label} only when relevant:\n\n" + memory_block
         )
     )
     return f"""You are the Airline customer-service agent in a TAU-2 benchmark.
@@ -125,6 +138,7 @@ class HermesTau2StepRuntime:
         self.config = config
         self.hermes_repo = hermes_repo
         self.memory = OpenVikingAdapter(config) if memory_enabled else None
+        self.search_memory_type = configured_search_memory_type(config)
         self.trace_dir = trace_dir
         self.agent: Any = None
         self.history: list[dict[str, Any]] = []
@@ -149,7 +163,7 @@ class HermesTau2StepRuntime:
             block, matches = self.memory.retrieve(
                 first_user,
                 limit=int(self.config.get("first_user_top_k", 4)),
-                memory_type="trajectories",
+                memory_type=self.search_memory_type,
             )
             memory_block = block
             self.first_retrieval = {
@@ -158,12 +172,14 @@ class HermesTau2StepRuntime:
                 "injected": bool(block),
                 "injected_chars": len(block),
                 "retrieval_latency_sec": time.monotonic() - retrieval_started,
+                "memory_type": self.search_memory_type,
             }
         scope_path = Path(self.config["memory_scope_file"])
         prompt = _system_prompt(
             self.domain_policy,
             scope_path.read_text(encoding="utf-8").strip(),
             memory_block,
+            self.search_memory_type,
         )
         from run_agent import AIAgent
 
@@ -293,7 +309,7 @@ class HermesTau2StepRuntime:
         block, matches = self.memory.retrieve(
             query,
             limit=int(self.config.get("prewrite_top_k", 2)),
-            memory_type="trajectories",
+            memory_type=self.search_memory_type,
         )
         event = {
             "candidate_name": candidate["name"],
@@ -304,13 +320,15 @@ class HermesTau2StepRuntime:
             "injected_chars": len(block),
             "retrieval_latency_sec": time.monotonic() - started,
             "candidate_executed": False,
+            "memory_type": self.search_memory_type,
         }
         trace["prewrite_retrieval"] = event
         if not block.strip():
             return content, calls, trace
         correction = (
             "The previous candidate business write was NOT executed. Reconsider the pending "
-            "decision using these advisory trajectories, then issue the correct next tool call.\n\n"
+            f"decision using these advisory {_memory_label(self.search_memory_type)}, then issue "
+            "the correct next tool call.\n\n"
             + block
         )
         regenerated_content, regenerated_calls, regenerated_trace = self._model_call(correction)
@@ -353,6 +371,7 @@ class HermesTau2StepRuntime:
         trace.update(
             {
                 "adapter": "hermes_configured_external_step_adapter",
+                "search_memory_type": self.search_memory_type if self.memory else None,
                 "tool_events": [
                     {
                         "name": call["name"],

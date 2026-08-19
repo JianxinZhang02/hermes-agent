@@ -16,6 +16,17 @@ AGENT_MEMORY_POLICY = {
     "self": {"enabled": True},
     "peer": {"enabled": False},
 }
+SUPPORTED_SEARCH_MEMORY_TYPES = frozenset({"trajectories", "experiences"})
+
+
+def configured_search_memory_type(config: dict[str, Any]) -> str:
+    memory_type = str(config.get("search_memory_type") or "trajectories").strip().lower()
+    if memory_type not in SUPPORTED_SEARCH_MEMORY_TYPES:
+        raise ValueError(
+            "search_memory_type must be one of "
+            f"{sorted(SUPPORTED_SEARCH_MEMORY_TYPES)}; got {memory_type!r}"
+        )
+    return memory_type
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
 
 
@@ -213,6 +224,8 @@ class OpenVikingAdapter:
         )
 
     def _target_uri(self, memory_type: str) -> str:
+        if memory_type not in SUPPORTED_SEARCH_MEMORY_TYPES:
+            raise ValueError(f"Unsupported Agent memory type: {memory_type!r}")
         configured = str(self.config["search_uri"]).rstrip("/")
         marker = "/memories/"
         if marker in configured:
@@ -258,7 +271,7 @@ class OpenVikingAdapter:
         query: str,
         *,
         limit: int,
-        memory_type: str = "trajectories",
+        memory_type: str,
     ) -> tuple[str, list[dict[str, Any]]]:
         async def operation() -> tuple[str, list[dict[str, Any]]]:
             client = self._async_client()
@@ -576,7 +589,7 @@ class OpenVikingAdapter:
         }
         if int(snapshot.get("item_count", 0)) <= 0:
             raise RuntimeError(
-                "OpenViking index repair produced no searchable trajectory: "
+                f"OpenViking index repair produced no searchable {memory_type}: "
                 + json.dumps(result, ensure_ascii=False, default=str)
             )
         return result
