@@ -256,25 +256,28 @@ class HermesTau2Runtime:
         self.config = config
         self.hermes_repo = hermes_repo
         self.memory = OpenVikingAdapter(config) if memory_enabled else None
-        # TAU-2's agent-side Tool objects are an initial snapshot of the
-        # environment.  The formal environment is advanced later by replaying
-        # Hermes' tool calls, but that replay does not update these Tool
-        # objects.  Keep one isolated shadow toolkit for the whole simulation
-        # so speculative execution advances in lockstep with formal replay.
-        # Re-cloning self.tools on every user turn would reset the shadow to
-        # the initial DB and diverge after the first successful write.
-        try:
-            _preflight_airline_shadow(self.tools)
-            self.speculative_tools = _clone_bound_tools(self.tools)
-        except Exception as exc:
-            raise RuntimeError(
-                "TAU-2 Airline tools could not be isolated for Hermes speculative execution; "
-                "refusing to risk double mutation of the benchmark environment"
-            ) from exc
+        # TAU-2 constructs the Agent before Orchestrator.initialize() applies
+        # task.initial_state to the formal Environment.  Therefore the shadow
+        # must be created lazily on the first user turn, not here.  Once made,
+        # it persists for the whole simulation and advances in lockstep with
+        # formal replay.
+        self.speculative_tools: list[Any] | None = None
         self.bridge: TauToolBridge | None = None
         self.trace_dir = trace_dir
         self.agent: Any = None
         self.first_retrieval: dict[str, Any] | None = None
+
+    def _ensure_speculative_tools(self) -> list[Any]:
+        if self.speculative_tools is None:
+            try:
+                _preflight_airline_shadow(self.tools)
+                self.speculative_tools = _clone_bound_tools(self.tools)
+            except Exception as exc:
+                raise RuntimeError(
+                    "TAU-2 Airline tools could not be isolated after task initialization; "
+                    "refusing to risk benchmark state divergence"
+                ) from exc
+        return self.speculative_tools
 
     def _create_agent(self, first_user: str) -> None:
         if str(self.hermes_repo) not in sys.path:
@@ -336,13 +339,14 @@ class HermesTau2Runtime:
         }
 
     def respond(self, user_text: str, state: HermesState) -> tuple[str, HermesState, dict[str, Any]]:
-        self.bridge = TauToolBridge(self.speculative_tools, self.memory, self.config)
+        speculative_tools = self._ensure_speculative_tools()
+        self.bridge = TauToolBridge(speculative_tools, self.memory, self.config)
         self.bridge.register()
         if self.agent is None:
             self._create_agent(user_text)
         else:
             self.agent.tools = self.bridge.schemas()
-            self.agent.valid_tool_names = {tool.name for tool in self.speculative_tools}
+            self.agent.valid_tool_names = {tool.name for tool in speculative_tools}
         state.user_turn += 1
         self.bridge.start_user_turn(state.user_turn)
         before_messages = len(state.history)

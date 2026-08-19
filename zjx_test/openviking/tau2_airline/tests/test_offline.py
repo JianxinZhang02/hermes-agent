@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from tau2_airline.hermes_agent import (
 )
 from tau2_airline.pipeline import (
     _cell_runtime_cost,
+    _infrastructure_error_count,
     _public_config,
     _quarantine_invalid_cell,
     _replay_mismatch_events,
@@ -136,17 +138,21 @@ def test_speculative_shadow_persists_across_user_turns(monkeypatch, tmp_path):
         trace_dir=tmp_path,
     )
 
-    shadow = runtime.speculative_tools[0]
-    assert shadow(value="first") == {"rows": 1}
-    # Formal replay advances independently by the same operation.
-    assert formal_tool(value="first") == {"rows": 1}
+    # TAU-2 applies task.initial_state only after constructing the Agent.
+    formal.rows.append("task-initialization")
+    shadow = runtime._ensure_speculative_tools()[0]
+    assert shadow._func.__self__.rows == ["task-initialization"]
+    assert shadow(value="first") == {"rows": 2}
+    # Formal replay advances independently from the same task-initialized
+    # state with the same operation.
+    assert formal_tool(value="first") == {"rows": 2}
 
     # A later turn must reuse the advanced shadow.  Re-cloning the original
     # formal Tool snapshot here was the bug that caused duplicate refunds and
     # seat/reservation divergence in Airline seed 300.
-    assert runtime.speculative_tools[0] is shadow
-    assert shadow(value="second") == {"rows": 2}
-    assert formal_tool(value="second") == {"rows": 2}
+    assert runtime._ensure_speculative_tools()[0] is shadow
+    assert shadow(value="second") == {"rows": 3}
+    assert formal_tool(value="second") == {"rows": 3}
 
 
 def test_real_airline_shadow_preflight_is_read_only():
@@ -157,6 +163,35 @@ def test_real_airline_shadow_preflight_is_read_only():
     before = environment.get_db_hash()
     _preflight_airline_shadow(environment.get_tools())
     assert environment.get_db_hash() == before
+
+
+def test_real_airline_shadow_is_cloned_after_task_initialization(tmp_path):
+    pytest.importorskip("tau2.domains.airline.environment")
+    from tau2.domains.airline.environment import get_environment, get_tasks
+
+    environment = get_environment()
+    runtime = HermesTau2Runtime(
+        tools=environment.get_tools(),
+        domain_policy=environment.get_policy(),
+        task_id="13",
+        config={},
+        hermes_repo=tmp_path,
+        memory_enabled=False,
+        trace_dir=tmp_path,
+    )
+    assert runtime.speculative_tools is None
+
+    task = next(task for task in get_tasks("test") if str(task.id) == "13")
+    initial = task.initial_state
+    environment.set_state(
+        initialization_data=initial.initialization_data if initial else None,
+        initialization_actions=initial.initialization_actions if initial else None,
+        message_history=deepcopy(initial.message_history or []) if initial else [],
+    )
+    formal_owner = runtime.tools[0]._func.__self__
+    shadow_owner = runtime._ensure_speculative_tools()[0]._func.__self__
+    assert shadow_owner.db.model_dump_json() == formal_owner.db.model_dump_json()
+    assert shadow_owner.db is not formal_owner.db
 
 
 def test_invalid_cached_cell_is_costed_and_quarantined(tmp_path):
@@ -202,6 +237,19 @@ def test_invalid_cached_cell_is_costed_and_quarantined(tmp_path):
     assert (invalid[0] / output.name).is_file()
     assert (invalid[0] / checkpoint.name).is_dir()
     assert (invalid[0] / traces.name).is_dir()
+
+
+def test_infrastructure_error_cells_are_never_reusable():
+    data = {
+        "simulations": [
+            {"termination_reason": "user_stop", "info": {}},
+            {
+                "termination_reason": "infrastructure_error",
+                "info": {"error": "fatal replay mismatch"},
+            },
+        ]
+    }
+    assert _infrastructure_error_count(data) == 1
 
 
 def test_prewrite_memory_blocks_first_write_then_allows_reissued_call():

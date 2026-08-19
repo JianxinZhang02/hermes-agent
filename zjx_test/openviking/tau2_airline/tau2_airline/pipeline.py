@@ -77,6 +77,15 @@ def _replay_mismatch_events(data: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _infrastructure_error_count(data: dict[str, Any]) -> int:
+    return sum(
+        1
+        for sim in data.get("simulations") or []
+        if str(sim.get("termination_reason") or "").lower() == "infrastructure_error"
+        or bool((sim.get("info") or {}).get("error"))
+    )
+
+
 def _quarantine_invalid_cell(output: Path, reason: str, cost: dict[str, Any]) -> None:
     stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns()}"
     quarantine = output.parent.parent / "invalid_cells" / f"{output.stem}-{stamp}"
@@ -259,13 +268,28 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
     for seed in config["seeds"]:
         for arm, memory_enabled in (("no_memory", False), ("openviking", True)):
             output = paths.cells / f"airline_{arm}_seed{seed}.json"
+            fatal_marker = output.parent / f"{output.stem}_hermes_traces" / "fatal_replay_mismatch.json"
+            if fatal_marker.is_file() and not force:
+                fatal_data = json.loads(fatal_marker.read_text(encoding="utf-8"))
+                _quarantine_invalid_cell(
+                    output,
+                    "fatal replay marker from an interrupted/failed cell: "
+                    + json.dumps(fatal_data, ensure_ascii=False, sort_keys=True),
+                    _cell_runtime_cost(
+                        json.loads(output.read_text(encoding="utf-8"))
+                        if output.is_file()
+                        else {"simulations": []}
+                    ),
+                )
             if output.is_file() and not force:
                 cached = json.loads(output.read_text(encoding="utf-8"))
                 cached_mismatches = _replay_mismatch_events(cached)
-                if cached_mismatches:
+                cached_infrastructure_errors = _infrastructure_error_count(cached)
+                if cached_mismatches or cached_infrastructure_errors:
                     _quarantine_invalid_cell(
                         output,
-                        f"{len(cached_mismatches)} speculative/formal replay mismatches",
+                        f"{len(cached_mismatches)} speculative/formal replay mismatches; "
+                        f"{cached_infrastructure_errors} infrastructure errors",
                         _cell_runtime_cost(cached),
                     )
             if not output.is_file() or force:
@@ -285,6 +309,12 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
             simulations = data.get("simulations") or []
             if len(simulations) != int(config["eval_tasks"]):
                 raise RuntimeError(f"Incomplete cell {output.name}: {len(simulations)} simulations")
+            infrastructure_errors = _infrastructure_error_count(data)
+            if infrastructure_errors:
+                raise RuntimeError(
+                    f"Invalid cell {output.name}: {infrastructure_errors} infrastructure errors; "
+                    f"consumed={json.dumps(_cell_runtime_cost(data), ensure_ascii=False, sort_keys=True)}"
+                )
             writes = sum(
                 int(trace.get("openviking_write_count", 0) or 0)
                 for sim in simulations
