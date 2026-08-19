@@ -141,6 +141,19 @@ def _memory_uris(value: Any) -> list[str]:
     return sorted(found)
 
 
+def _result_memories(result: Any) -> list[Any]:
+    """Accept both HTTP SDK dict results and embedded-client result objects."""
+    if isinstance(result, dict):
+        return list(result.get("memories") or [])
+    return list(getattr(result, "memories", []) or [])
+
+
+def _match_value(match: Any, key: str, default: Any = None) -> Any:
+    if isinstance(match, dict):
+        return match.get(key, default)
+    return getattr(match, key, default)
+
+
 def validate_agent_evolution_task(task: dict[str, Any]) -> None:
     """Fail immediately when the server archived a session without Agent Memory."""
     result = task.get("result") or {}
@@ -245,7 +258,7 @@ class OpenVikingAdapter:
                     target_uri=self._target_uri(memory_type),
                     limit=max(limit, 1),
                 )
-                matches = list(getattr(search_result, "memories", []) or [])
+                matches = _result_memories(search_result)
                 retrieval_method = "search"
                 if not matches:
                     # OpenViking 0.4.12 can return an empty hierarchical search
@@ -258,12 +271,11 @@ class OpenVikingAdapter:
                         limit=max(limit, 1),
                         score_threshold=0.0,
                         context_type="memory",
-                        level=[2],
                     )
-                    matches = list(getattr(find_result, "memories", []) or [])
+                    matches = _result_memories(find_result)
                     retrieval_method = "find_fallback"
                 for match in matches:
-                    uri = str(getattr(match, "uri", "") or "")
+                    uri = str(_match_value(match, "uri", "") or "")
                     if not is_memory_type_uri(uri, memory_type):
                         continue
                     self.read_count += 1
@@ -282,8 +294,8 @@ class OpenVikingAdapter:
                         used += len(block)
                     row = {
                         "uri": uri,
-                        "score": getattr(match, "score", None),
-                        "level": getattr(match, "level", None),
+                        "score": _match_value(match, "score"),
+                        "level": _match_value(match, "level"),
                         "text_chars": len(text),
                         "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                         "injected": injected,

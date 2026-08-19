@@ -11,6 +11,8 @@ from tau2_airline.hermes_agent import HermesTau2StepRuntime, _system_prompt
 from tau2_airline.openviking_adapter import (
     AGENT_MEMORY_POLICY,
     OpenVikingAdapter,
+    _match_value,
+    _result_memories,
     encode_role_tool_blocks,
     is_memory_type_uri,
     validate_agent_evolution_task,
@@ -43,6 +45,14 @@ class FakeTool:
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
         return {"ok": True}
+
+
+def test_http_search_dict_and_embedded_object_results_are_both_supported():
+    row = {"uri": "viking://user/alice/memories/trajectories/example.md", "score": 0.9}
+    assert _result_memories({"memories": [row]}) == [row]
+    assert _result_memories(SimpleNamespace(memories=[SimpleNamespace(uri="object")]))[0].uri == "object"
+    assert _match_value(row, "uri") == row["uri"]
+    assert _match_value(SimpleNamespace(score=0.8), "score") == 0.8
 
 
 class FakeMemory:
