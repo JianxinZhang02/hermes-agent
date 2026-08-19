@@ -72,9 +72,97 @@ def _infrastructure_error_count(data: dict[str, Any]) -> int:
     return sum(
         1
         for sim in data.get("simulations") or []
-        if str(sim.get("termination_reason") or "").lower() == "infrastructure_error"
+        if _is_infrastructure_error(sim)
+    )
+
+
+def _is_infrastructure_error(sim: dict[str, Any]) -> bool:
+    return (
+        str(sim.get("termination_reason") or "").lower() == "infrastructure_error"
         or bool((sim.get("info") or {}).get("error"))
     )
+
+
+def _repair_infrastructure_errors(
+    *,
+    paths: Paths,
+    config: dict[str, Any],
+    output: Path,
+    data: dict[str, Any],
+    seed: int,
+    memory_enabled: bool,
+    attempts: int = 2,
+) -> dict[str, Any]:
+    """Rerun only infrastructure-failed TAU tasks and merge successful repairs."""
+    original = json.loads(json.dumps(data))
+    repair_root = paths.run_dir / "cell_repairs" / output.stem
+    repair_root.mkdir(parents=True, exist_ok=True)
+    original_path = repair_root / "original_invalid_cell.json"
+    if not original_path.is_file():
+        write_json(original_path, original)
+
+    simulations = list(data.get("simulations") or [])
+    for attempt in range(1, attempts + 1):
+        failed_ids = [
+            str(sim.get("task_id"))
+            for sim in simulations
+            if _is_infrastructure_error(sim)
+        ]
+        if not failed_ids:
+            break
+        print(
+            f"      repairing {output.name}: infrastructure task(s) "
+            f"{','.join(failed_ids)} attempt {attempt}/{attempts}",
+            flush=True,
+        )
+        repair_output = repair_root / f"attempt_{attempt}.json"
+        repaired = run_cell(
+            tau2_repo=paths.tau2_repo,
+            hermes_repo=paths.hermes_repo,
+            config=config,
+            output=repair_output,
+            split=config["eval_split"],
+            num_tasks=len(failed_ids),
+            seed=int(seed),
+            memory_enabled=memory_enabled,
+            fixture=paths.fixture,
+            reset=True,
+            task_ids=failed_ids,
+        )
+        repaired_by_id = {
+            str(sim.get("task_id")): sim for sim in repaired.get("simulations") or []
+        }
+        missing = sorted(set(failed_ids) - set(repaired_by_id))
+        if missing:
+            raise RuntimeError(
+                f"Targeted repair omitted task(s) {missing} for {output.name}"
+            )
+        simulations = [
+            repaired_by_id.get(str(sim.get("task_id")), sim) for sim in simulations
+        ]
+        data["simulations"] = simulations
+        write_json(output, data)
+
+    remaining = [
+        str(sim.get("task_id")) for sim in simulations if _is_infrastructure_error(sim)
+    ]
+    write_json(
+        repair_root / "repair_manifest.json",
+        {
+            "cell": output.name,
+            "seed": seed,
+            "memory_enabled": memory_enabled,
+            "original_cost": _cell_runtime_cost(original),
+            "remaining_infrastructure_task_ids": remaining,
+            "repaired": not remaining,
+        },
+    )
+    if remaining:
+        raise RuntimeError(
+            f"Targeted repair still has infrastructure errors for {output.name}: {remaining}"
+        )
+    print(f"      targeted repair completed for {output.name}", flush=True)
+    return data
 
 
 def _quarantine_invalid_cell(output: Path, reason: str, cost: dict[str, Any]) -> None:
@@ -375,7 +463,7 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
                     trace.get("adapter") != "hermes_configured_external_step_adapter"
                     for trace in cached_traces
                 ) or not cached_traces
-                if wrong_adapter or cached_infrastructure_errors:
+                if wrong_adapter:
                     _quarantine_invalid_cell(
                         output,
                         f"wrong_step_adapter={wrong_adapter}; "
@@ -401,10 +489,15 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
                 raise RuntimeError(f"Incomplete cell {output.name}: {len(simulations)} simulations")
             infrastructure_errors = _infrastructure_error_count(data)
             if infrastructure_errors:
-                raise RuntimeError(
-                    f"Invalid cell {output.name}: {infrastructure_errors} infrastructure errors; "
-                    f"consumed={json.dumps(_cell_runtime_cost(data), ensure_ascii=False, sort_keys=True)}"
+                data = _repair_infrastructure_errors(
+                    paths=paths,
+                    config=config,
+                    output=output,
+                    data=data,
+                    seed=int(seed),
+                    memory_enabled=memory_enabled,
                 )
+                simulations = data.get("simulations") or []
             writes = sum(
                 int(trace.get("openviking_write_count", 0) or 0)
                 + int(trace.get("openviking_session_commit_count", 0) or 0)

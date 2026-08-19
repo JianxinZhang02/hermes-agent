@@ -23,6 +23,7 @@ from tau2_airline.pipeline import (
     _infrastructure_error_count,
     _public_config,
     _quarantine_invalid_cell,
+    _repair_infrastructure_errors,
     audit_memory,
     report,
 )
@@ -387,6 +388,43 @@ def test_infrastructure_error_cells_are_never_reusable():
         ]
     }
     assert _infrastructure_error_count(data) == 1
+
+
+def test_targeted_cell_repair_preserves_successful_simulations(tmp_path, monkeypatch):
+    output = tmp_path / "cells" / "airline_no_memory_seed300.json"
+    output.parent.mkdir(parents=True)
+    good = {"task_id": "2", "termination_reason": "normal", "messages": [{"content": "keep"}]}
+    bad = {
+        "task_id": "1",
+        "termination_reason": "infrastructure_error",
+        "info": {"error": "timeout"},
+    }
+    data = {"simulations": [bad, good]}
+    write_json(output, data)
+
+    def fake_run_cell(**kwargs):
+        assert kwargs["task_ids"] == ["1"]
+        repaired = {"simulations": [{"task_id": "1", "termination_reason": "normal"}]}
+        write_json(kwargs["output"], repaired)
+        return repaired
+
+    monkeypatch.setattr("tau2_airline.pipeline.run_cell", fake_run_cell)
+    paths = SimpleNamespace(
+        run_dir=tmp_path,
+        tau2_repo=tmp_path / "tau2",
+        hermes_repo=tmp_path / "hermes",
+        fixture=tmp_path / "fixture.json",
+    )
+    repaired = _repair_infrastructure_errors(
+        paths=paths,
+        config={"eval_split": "test"},
+        output=output,
+        data=data,
+        seed=300,
+        memory_enabled=False,
+    )
+    assert _infrastructure_error_count(repaired) == 0
+    assert repaired["simulations"][1] == good
 
 
 def test_baseline_prompt_contains_no_retrieved_memory():
