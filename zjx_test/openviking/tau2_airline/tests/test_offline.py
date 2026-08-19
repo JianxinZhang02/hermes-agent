@@ -10,6 +10,7 @@ from tau2_airline.config import DEFAULT_CONFIG, Paths, load_json, sha256_json
 from tau2_airline.hermes_agent import (
     HermesTau2Runtime,
     TauToolBridge,
+    _FormalToolTransaction,
     _clone_bound_tools,
     _jsonable,
     _preflight_airline_shadow,
@@ -54,13 +55,25 @@ class FakeMemory:
         return "verify the current reservation before booking", [{"uri": "viking://memory/1"}]
 
 
-class FakeToolkit:
+class FakeDB:
     def __init__(self):
         self.rows = []
 
+    def model_dump_json(self):
+        return json.dumps(self.rows)
+
+
+class FakeToolkit:
+    def __init__(self):
+        self.db = FakeDB()
+
+    @property
+    def rows(self):
+        return self.db.rows
+
     def reserve(self, value):
-        self.rows.append(value)
-        return {"rows": len(self.rows)}
+        self.db.rows.append(value)
+        return {"rows": len(self.db.rows)}
 
 
 class FakeBoundTool:
@@ -80,6 +93,7 @@ def test_protocol_defaults_are_the_requested_airline_four_seed_cell():
     assert config["max_steps"] == 200
     assert config["simulation_timeout"] == 900
     assert config["agent_request_timeout"] == 180
+    assert config["max_retries"] == 0
     assert config["corpus_revision"] == "async-loop-v2"
     assert config["temperature"] == 0
     assert config["user_simulator_policy"] == "confirmation_aware"
@@ -138,21 +152,11 @@ def test_speculative_shadow_persists_across_user_turns(monkeypatch, tmp_path):
         trace_dir=tmp_path,
     )
 
-    # TAU-2 applies task.initial_state only after constructing the Agent.
     formal.rows.append("task-initialization")
-    shadow = runtime._ensure_speculative_tools()[0]
-    assert shadow._func.__self__.rows == ["task-initialization"]
-    assert shadow(value="first") == {"rows": 2}
-    # Formal replay advances independently from the same task-initialized
-    # state with the same operation.
-    assert formal_tool(value="first") == {"rows": 2}
-
-    # A later turn must reuse the advanced shadow.  Re-cloning the original
-    # formal Tool snapshot here was the bug that caused duplicate refunds and
-    # seat/reservation divergence in Airline seed 300.
-    assert runtime._ensure_speculative_tools()[0] is shadow
-    assert shadow(value="second") == {"rows": 3}
-    assert formal_tool(value="second") == {"rows": 3}
+    with _FormalToolTransaction([formal_tool]):
+        assert formal_tool(value="first") == {"rows": 2}
+        assert formal_tool(value="second") == {"rows": 3}
+    assert formal.rows == ["task-initialization"]
 
 
 def test_real_airline_shadow_preflight_is_read_only():
@@ -179,8 +183,6 @@ def test_real_airline_shadow_is_cloned_after_task_initialization(tmp_path):
         memory_enabled=False,
         trace_dir=tmp_path,
     )
-    assert runtime.speculative_tools is None
-
     task = next(task for task in get_tasks("test") if str(task.id) == "13")
     initial = task.initial_state
     environment.set_state(
@@ -189,9 +191,53 @@ def test_real_airline_shadow_is_cloned_after_task_initialization(tmp_path):
         message_history=deepcopy(initial.message_history or []) if initial else [],
     )
     formal_owner = runtime.tools[0]._func.__self__
-    shadow_owner = runtime._ensure_speculative_tools()[0]._func.__self__
-    assert shadow_owner.db.model_dump_json() == formal_owner.db.model_dump_json()
-    assert shadow_owner.db is not formal_owner.db
+    before = formal_owner.db.model_dump_json()
+    with _FormalToolTransaction(runtime.tools):
+        formal_owner.db.reservations.clear()
+        assert formal_owner.db.model_dump_json() != before
+    assert formal_owner.db.model_dump_json() == before
+
+
+def test_task8_hathat_booking_transaction_matches_formal_replay():
+    pytest.importorskip("tau2.domains.airline.environment")
+    from tau2.domains.airline.environment import get_environment
+
+    environment = get_environment()
+    tools = environment.get_tools()
+    owner = tools[0]._func.__self__
+    book = next(tool for tool in tools if tool.name == "book_reservation")
+    from tools.registry import registry
+
+    bridge = TauToolBridge(tools, None, {})
+    bridge.register()
+    arguments = {
+        "user_id": "sophia_silva_7557",
+        "origin": "ORD",
+        "destination": "PHL",
+        "flight_type": "one_way",
+        "cabin": "economy",
+        "flights": [{"flight_number": "HAT271", "date": "2024-05-26"}],
+        "passengers": [
+            {"first_name": "Sophia", "last_name": "Silva", "dob": "1957-10-05"},
+            {"first_name": "Kevin", "last_name": "Smith", "dob": "2001-04-12"},
+        ],
+        "payment_methods": [{"payment_id": "certificate_8045380", "amount": 348}],
+        "total_baggages": 0,
+        "nonfree_baggages": 0,
+        "insurance": "no",
+    }
+
+    def seats():
+        return owner.db.flights["HAT271"].dates["2024-05-26"].available_seats["economy"]
+
+    assert seats() == 3
+    with _FormalToolTransaction(tools):
+        speculative = json.loads(registry.dispatch("book_reservation", arguments))
+        assert seats() == 1
+    assert seats() == 3
+    formal = _jsonable(book(**arguments))
+    assert formal == speculative
+    assert seats() == 1
 
 
 def test_invalid_cached_cell_is_costed_and_quarantined(tmp_path):

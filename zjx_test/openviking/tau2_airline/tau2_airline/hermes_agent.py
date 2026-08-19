@@ -114,6 +114,48 @@ def _preflight_airline_shadow(tools: list[Any]) -> None:
     _AIRLINE_SHADOW_PREFLIGHT_DONE = True
 
 
+class _FormalToolTransaction:
+    """Temporarily let Hermes use TAU-2 tools, then restore formal DB state.
+
+    Hermes needs real tool results inside its internal multi-step loop. TAU-2
+    must nevertheless be the sole durable executor. We therefore snapshot
+    every bound toolkit DB once per Hermes response, allow Hermes to run the
+    actual tools (so dependent calls observe prior calls), and restore the DB
+    before returning the tool calls to TAU-2 for formal replay.
+    """
+
+    def __init__(self, tools: list[Any]):
+        self.tools = tools
+        self._owners: list[tuple[Any, Any, str | None]] = []
+
+    def __enter__(self) -> "_FormalToolTransaction":
+        seen: set[int] = set()
+        for tool in self.tools:
+            owner = getattr(getattr(tool, "_func", None), "__self__", None)
+            db = getattr(owner, "db", None)
+            if owner is None or db is None or id(owner) in seen:
+                continue
+            seen.add(id(owner))
+            before = db.model_dump_json() if hasattr(db, "model_dump_json") else None
+            self._owners.append((owner, deepcopy(db), before))
+        if not self._owners:
+            raise RuntimeError("TAU-2 formal tool transaction found no bound toolkit DB")
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        restore_errors = []
+        for owner, snapshot, before in self._owners:
+            owner.db = snapshot
+            if before is not None and owner.db.model_dump_json() != before:
+                restore_errors.append(type(owner).__name__)
+        if restore_errors:
+            raise RuntimeError(
+                "TAU-2 formal DB rollback verification failed for: "
+                + ", ".join(restore_errors)
+            )
+        return False
+
+
 def _system_prompt(policy: str, memory_scope: str, memory_block: str | None) -> str:
     memory = (
         "No OpenViking experience memory is enabled for this arm."
@@ -256,28 +298,10 @@ class HermesTau2Runtime:
         self.config = config
         self.hermes_repo = hermes_repo
         self.memory = OpenVikingAdapter(config) if memory_enabled else None
-        # TAU-2 constructs the Agent before Orchestrator.initialize() applies
-        # task.initial_state to the formal Environment.  Therefore the shadow
-        # must be created lazily on the first user turn, not here.  Once made,
-        # it persists for the whole simulation and advances in lockstep with
-        # formal replay.
-        self.speculative_tools: list[Any] | None = None
         self.bridge: TauToolBridge | None = None
         self.trace_dir = trace_dir
         self.agent: Any = None
         self.first_retrieval: dict[str, Any] | None = None
-
-    def _ensure_speculative_tools(self) -> list[Any]:
-        if self.speculative_tools is None:
-            try:
-                _preflight_airline_shadow(self.tools)
-                self.speculative_tools = _clone_bound_tools(self.tools)
-            except Exception as exc:
-                raise RuntimeError(
-                    "TAU-2 Airline tools could not be isolated after task initialization; "
-                    "refusing to risk benchmark state divergence"
-                ) from exc
-        return self.speculative_tools
 
     def _create_agent(self, first_user: str) -> None:
         if str(self.hermes_repo) not in sys.path:
@@ -339,24 +363,24 @@ class HermesTau2Runtime:
         }
 
     def respond(self, user_text: str, state: HermesState) -> tuple[str, HermesState, dict[str, Any]]:
-        speculative_tools = self._ensure_speculative_tools()
-        self.bridge = TauToolBridge(speculative_tools, self.memory, self.config)
+        self.bridge = TauToolBridge(self.tools, self.memory, self.config)
         self.bridge.register()
         if self.agent is None:
             self._create_agent(user_text)
         else:
             self.agent.tools = self.bridge.schemas()
-            self.agent.valid_tool_names = {tool.name for tool in speculative_tools}
+            self.agent.valid_tool_names = {tool.name for tool in self.tools}
         state.user_turn += 1
         self.bridge.start_user_turn(state.user_turn)
         before_messages = len(state.history)
         before_usage = self._usage()
         turn_started = time.monotonic()
-        result = self.agent.run_conversation(
-            user_text,
-            conversation_history=state.history,
-            task_id=f"tau2-{self.task_id}-turn-{state.user_turn}",
-        )
+        with _FormalToolTransaction(self.tools):
+            result = self.agent.run_conversation(
+                user_text,
+                conversation_history=state.history,
+                task_id=f"tau2-{self.task_id}-turn-{state.user_turn}",
+            )
         if result.get("failed"):
             raise RuntimeError(f"Hermes turn failed: {result.get('error') or result.get('final_response')}")
         history = [m for m in (result.get("messages") or []) if m.get("role") != "system"]

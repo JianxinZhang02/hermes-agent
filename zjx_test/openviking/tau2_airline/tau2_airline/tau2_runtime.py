@@ -268,6 +268,7 @@ def run_cell(
     memory_enabled: bool,
     fixture: Path | None,
     reset: bool = False,
+    task_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     add_tau2_to_path(tau2_repo)
     if config.get("user_simulator_policy") == "confirmation_aware":
@@ -297,7 +298,8 @@ def run_cell(
         config_cls(
             domain="airline",
             task_split_name=split,
-            num_tasks=num_tasks,
+            task_ids=task_ids,
+            num_tasks=len(task_ids) if task_ids is not None else num_tasks,
             agent=AGENT_NAME,
             llm_agent=config["user_model"],
             llm_args_agent=user_args,
@@ -312,6 +314,7 @@ def run_cell(
             seed=seed,
             log_level="INFO",
             auto_resume=True,
+            max_retries=int(config.get("max_retries", 0)),
         )
     )
     fatal = _RUNTIME.get("fatal_replay_error")

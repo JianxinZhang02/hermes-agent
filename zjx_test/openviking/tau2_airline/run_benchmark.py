@@ -9,12 +9,15 @@ import sys
 from pathlib import Path
 
 from tau2_airline.config import DEFAULT_CONFIG, ROOT, load_json, require_runtime, resolve_paths
-from tau2_airline.pipeline import bootstrap, build_corpus, evaluate, report
+from tau2_airline.pipeline import bootstrap, build_corpus, evaluate, report, smoke_replay
 
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Hermes × TAU-2 Airline × OpenViking benchmark")
-    p.add_argument("phase", choices=["preflight", "bootstrap", "build", "eval", "report", "all"])
+    p.add_argument(
+        "phase",
+        choices=["preflight", "bootstrap", "build", "smoke", "eval", "report", "all"],
+    )
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--run-dir", type=Path, required=True)
     p.add_argument("--hermes-repo", type=Path)
@@ -56,7 +59,7 @@ def main() -> int:
     args = parser().parse_args()
     cfg = runtime_config(args)
     paths = resolve_paths(args)
-    need_ov = args.phase in {"build", "eval", "all"} and not args.offline
+    need_ov = args.phase in {"build", "smoke", "eval", "all"} and not args.offline
     require_runtime(paths, need_openviking=need_ov)
     if args.phase != "report" and not cfg.get("agent_api_key") and not args.offline:
         raise RuntimeError("Set HERMES_AGENT_API_KEY (or OPENAI_API_KEY); keys are never written to artifacts")
@@ -76,6 +79,12 @@ def main() -> int:
     if args.phase in {"build", "all"}:
         result = build_corpus(paths, cfg, force=args.force)
         print(f"PASS build: committed {result['committed_count']} successful training trajectories")
+    if args.phase == "smoke":
+        result = smoke_replay(paths, cfg)
+        print(
+            "PASS smoke: OpenViking seed300/task8 replay and read-only checks passed; "
+            f"cost={json.dumps(result['cost'], ensure_ascii=False, sort_keys=True)}"
+        )
     if args.phase in {"eval", "all"}:
         result = evaluate(paths, cfg, force=args.force)
         print(f"PASS eval: {result['expected_simulation_count']} paired simulations; read-only verified")

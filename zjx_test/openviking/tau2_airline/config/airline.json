@@ -9,6 +9,7 @@
   "max_steps": 200,
   "simulation_timeout": 900,
   "agent_request_timeout": 180,
+  "max_retries": 0,
   "task_concurrency": 1,
   "agent_model": "deepseek-v4-flash",
   "user_model": "openai/deepseek-v4-flash",

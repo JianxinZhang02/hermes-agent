@@ -361,6 +361,70 @@ def evaluate(paths: Paths, config: dict[str, Any], *, force: bool = False) -> di
     return manifest
 
 
+def smoke_replay(paths: Paths, config: dict[str, Any]) -> dict[str, Any]:
+    """Run only the historically failing OpenViking seed300/task8 cell."""
+    corpus_manifest = paths.corpus / "corpus_manifest.json"
+    if not corpus_manifest.is_file():
+        raise RuntimeError("Corpus manifest missing; run build first")
+    if not paths.fixture.is_file():
+        raise RuntimeError("Fixed-first-user fixture missing; run bootstrap first")
+
+    adapter = OpenVikingAdapter(config)
+    before = adapter.fingerprint()
+    output = paths.run_dir / "smoke" / "airline_openviking_seed300_task8.json"
+    run_cell(
+        tau2_repo=paths.tau2_repo,
+        hermes_repo=paths.hermes_repo,
+        config=config,
+        output=output,
+        split=config["eval_split"],
+        num_tasks=1,
+        seed=300,
+        memory_enabled=True,
+        fixture=paths.fixture,
+        reset=True,
+        task_ids=["8"],
+    )
+    data = json.loads(output.read_text(encoding="utf-8"))
+    simulations = data.get("simulations") or []
+    mismatches = _replay_mismatch_events(data)
+    infrastructure_errors = _infrastructure_error_count(data)
+    writes = sum(
+        int(trace.get("openviking_write_count", 0) or 0)
+        for sim in simulations
+        for trace in _iter_traces(sim)
+    )
+    after = adapter.fingerprint()
+    if len(simulations) != 1:
+        raise RuntimeError(f"smoke task8 produced {len(simulations)} simulations instead of 1")
+    if infrastructure_errors or mismatches or writes or before["sha256"] != after["sha256"]:
+        raise RuntimeError(
+            "task8 replay smoke failed: "
+            + json.dumps(
+                {
+                    "infrastructure_errors": infrastructure_errors,
+                    "replay_mismatches": len(mismatches),
+                    "openviking_writes": writes,
+                    "openviking_snapshot_unchanged": before["sha256"] == after["sha256"],
+                    "cost": _cell_runtime_cost(data),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    result = {
+        "task_id": "8",
+        "arm": "openviking",
+        "seed": 300,
+        "reward": _reward(simulations[0]),
+        "cost": _cell_runtime_cost(data),
+        "read_only_verified": True,
+        "replay_mismatches": 0,
+    }
+    write_json(paths.run_dir / "smoke_replay_manifest.json", result)
+    return result
+
+
 def _usage_and_tools(sim: dict[str, Any]) -> tuple[dict[str, int], int, int, int, int, float, int]:
     usage = {
         "input_tokens": 0,
