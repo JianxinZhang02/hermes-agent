@@ -4,7 +4,7 @@
 
 实验比较两组：
 
-- `no_memory`：当前源码中的 Hermes `AIAgent` + TAU-2 Airline 业务工具，不使用跨任务记忆；
+- `no_memory`：由当前源码 Hermes `AIAgent` 初始化模型客户端与请求配置、benchmark Step Adapter 驱动的 TAU-2 Airline Agent，不使用跨任务记忆；
 - `openviking`：同一个 Hermes Agent、同一组 Airline 工具，再加入 OpenViking trajectory memory。
 
 两组固定使用相同的 test split、4 个种子 `300..303`、每个种子 20 个任务、相同首条用户消息、相同 User Simulator、`temperature=0` 和最多 200 steps。总计 160 个评测 simulation。
@@ -13,14 +13,14 @@
 
 ## 重要边界
 
-1. Hermes 是真正的决策与工具循环：每个 user turn 都进入当前源码的 `AIAgent.run_conversation()`。
+1. 两组都使用 `Hermes-configured external Step Adapter`。它复用当前源码 `AIAgent` 的模型客户端、provider 配置、请求构造、system prompt 与工具 schema，但不调用会内部执行工具的 `run_conversation()`。
 2. 工具不是 Hermes 的 `terminal`、`session_search` 等通用工具，而是当前 TAU-2 Airline Environment 绑定的业务工具；这是 TAU-2 正确评测所必需的。
 3. Hermes 原生 Session DB、Memory Provider、`MEMORY.md/USER.md` 和上下文文件均关闭。基线是 no-memory，不是 Hermes Native Memory。
-4. OpenViking build 只提交 reward=1 的 train trajectory；不会把 reward、断言或 test 数据交给记忆提取器。
+4. OpenViking build 只提交 reward=1、DB evaluator 完整的 train trajectory；使用官方 `role_tool_blocks` 和显式 `cases/trajectories/experiences` memory policy，不会把 reward、断言或 test 数据交给记忆提取器。
    Build 会把每条成功提交立即写入 `corpus/commit_progress.json`，失败重跑时跳过已完成项；`corpus_revision` 同时隔离旧版客户端可能留下的半成品 session。
 5. eval 不创建或提交 OpenViking Session，只执行 `search/read`。开始与结束会比较 API 级 trajectory snapshot，并审计所有 Hermes trace 中的 OpenViking write count 必须为 0。
-6. 当前 OpenViking 官方 agent 会在写工具执行前重新生成该 assistant step。本 harness 因为坚持使用完整 Hermes Agent Loop，采取语义等价的桥接：Hermes 先在当前 Airline 环境的深拷贝中完成一轮决策；第一次 write-like 调用不执行而注入 Top-2，Hermes 重新决策；随后结构化工具调用被逐个回放给 TAU-2 正式环境。正式环境只执行一次，因而 TAU-2 的 action checks 和 DB evaluator 都能看到工具调用。每次回放会比较隔离副本与正式环境的工具结果，任何不一致都会使 eval 失败。报告应标记为 `Hermes speculative replay bridge`，不能冒充官方 LLMAgent adapter 的逐 token 完全复现。
-7. OpenViking snapshot 是通过公共 search/read API 获得的宽查询快照，不是服务端私有磁盘数据库的全量哈希；零写入同时由代码路径和 trace 审计保证。
+6. Hermes 只产生 tool call；TAU-2 Environment 是业务工具唯一执行者。TAU 返回的真实 ToolMessage 再送回 Hermes Step Adapter。写操作前 Top-2 recall 会丢弃未执行候选并重新生成，不存在 speculative execution、rollback 或 replay。
+7. OpenViking snapshot 只接受 URI 位于 `/memories/trajectories/` 的可读结果，并保存 URI/内容 hash；`events/entities/profile` 不计入 Agent experience corpus。
 
 ## 服务器准备
 
@@ -62,7 +62,7 @@ export OPENAI_API_BASE="$HERMES_AGENT_BASE_URL"
 
 ```bash
 cd /dfs/data/zjx/hermes-agent/zjx_test/openviking/tau2_airline
-RUN_DIR="$PWD/results/airline-deepseek-v1"
+RUN_DIR="$PWD/results/airline-step-agent-trajectory-v3"
 
 # 只检查路径与 Python 依赖，不访问本机/服务器 OpenViking
 python run_benchmark.py preflight --offline --run-dir "$RUN_DIR"
@@ -72,6 +72,15 @@ python run_benchmark.py bootstrap --run-dir "$RUN_DIR"
 
 # Hermes 跑 30 个 train task；只把成功 trajectory 提交给 OpenViking
 python run_benchmark.py build --run-dir "$RUN_DIR"
+
+# 零 Agent LLM 调用地验证 trajectory URI、正文结构和冻结 hash
+python run_benchmark.py audit-memory --run-dir "$RUN_DIR"
+
+# 零模型 Token：task8 的 Step Adapter 只产出调用，TAU-2 在一次性环境执行一次
+python run_benchmark.py diagnose-tools --run-dir "$RUN_DIR"
+
+# 只跑 seed300/task8；audit 会在任何 Agent LLM 调用前执行
+python run_benchmark.py smoke --run-dir "$RUN_DIR"
 
 # 冻结 corpus，运行 2 arms × 4 seeds × 20 test tasks
 python run_benchmark.py eval --run-dir "$RUN_DIR"
@@ -87,18 +96,20 @@ python run_benchmark.py report --run-dir "$RUN_DIR"
 ```bash
 python run_benchmark.py build \
   --run-dir "$RUN_DIR" \
-  --openviking-account default-hermes-airline-trajectory-v2 \
-  --openviking-user tau2-airline-hermes-trajectory-v2 \
+  --openviking-account default-hermes-airline-step-agent-trajectory-v3 \
+  --openviking-user tau2-airline-hermes-step-agent-trajectory-v3 \
   --search-uri 'viking://user/memories/trajectories'
 ```
 
-`build` 后先检查 `corpus/corpus_manifest.json` 的 `fingerprint.item_count` 与 `committed_count` 非零，再进入 eval。
+旧 `async-loop-v2` 的 22 个 Session 只保留作诊断，不得作为新实验 corpus。`build` 后必须运行 `audit-memory`；只有严格 trajectory URI 与冻结内容 hash 均通过后才能进入 smoke/eval。
 
 ## 结果
 
 - `fixed_first_user_fixture.json`：按 scenario SHA 固定首条用户消息；
 - `corpus/train_results.json`：Hermes 训练任务原始 TAU-2 结果；
 - `corpus/corpus_manifest.json`：成功轨迹、commit task、源码 commit 与冻结指纹；
+- `memory_audit_manifest.json`：trajectory/experience URI、内容 hash、结构与只读检查；
+- `zero_token_tool_diagnostic.json`：task8 初始 3 座、2 人预订及 TAU 单次执行审计；
 - `cells/*.json`：每个 arm/seed 的 20 个 simulation；
 - `eval_manifest.json`：覆盖数量、首句 fixture hash、eval 前后 fingerprint、零写审计；
 - `scoreboard.json`：accuracy/reward、DB match、tokens、Airline 工具调用、Top-4/Top-2 注入与 paired win/loss/tie。
@@ -113,4 +124,4 @@ TAU-2 reward 是正式指标，不使用额外 LLM Judge。`scoreboard.json` 中
 scripts/run_tests.sh zjx_test/openviking/tau2_airline/tests/test_offline.py
 ```
 
-本机仅能证明配置、桥接状态机、secret 过滤和模块语法正确；真实 Airline reward、OpenViking trajectory 产出与检索效果必须到服务器运行后才能验证。
+本机仅能证明配置、Step Adapter 状态机、官方 role/tool 编码、strict URI 过滤、secret 过滤和模块语法正确；真实 Airline reward、OpenViking trajectory 产出与检索效果必须到服务器运行后验证。

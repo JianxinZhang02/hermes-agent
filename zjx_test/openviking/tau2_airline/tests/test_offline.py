@@ -1,27 +1,25 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from tau2_airline.config import DEFAULT_CONFIG, Paths, load_json, sha256_json
-from tau2_airline.hermes_agent import (
-    HermesTau2Runtime,
-    TauToolBridge,
-    _FormalToolTransaction,
-    _clone_bound_tools,
-    _jsonable,
-    _preflight_airline_shadow,
-    _system_prompt,
+from tau2_airline.config import DEFAULT_CONFIG, Paths, load_json, sha256_json, write_json
+from tau2_airline.hermes_agent import HermesTau2StepRuntime, _system_prompt
+from tau2_airline.openviking_adapter import (
+    AGENT_MEMORY_POLICY,
+    OpenVikingAdapter,
+    encode_role_tool_blocks,
+    is_memory_type_uri,
 )
 from tau2_airline.pipeline import (
     _cell_runtime_cost,
     _infrastructure_error_count,
     _public_config,
     _quarantine_invalid_cell,
-    _replay_mismatch_events,
+    audit_memory,
     report,
 )
 from tau2_airline.tau2_runtime import _has_confirmation_aware_rule
@@ -47,298 +45,308 @@ class FakeTool:
 
 
 class FakeMemory:
-    def __init__(self):
+    def __init__(self, block="trajectory"):
+        self.block = block
         self.queries = []
+        self.write_count = 0
+        self.session_commit_count = 0
 
-    def retrieve(self, query, *, limit):
-        self.queries.append((query, limit))
-        return "verify the current reservation before booking", [{"uri": "viking://memory/1"}]
-
-
-class FakeDB:
-    def __init__(self):
-        self.rows = []
-
-    def model_dump_json(self):
-        return json.dumps(self.rows)
-
-
-class FakeToolkit:
-    def __init__(self):
-        self.db = FakeDB()
-
-    @property
-    def rows(self):
-        return self.db.rows
-
-    def reserve(self, value):
-        self.db.rows.append(value)
-        return {"rows": len(self.db.rows)}
+    def retrieve(self, query, *, limit, memory_type="trajectories"):
+        self.queries.append((query, limit, memory_type))
+        return self.block, [
+            {
+                "uri": "viking://user/u/memories/trajectories/book.md",
+                "injected": bool(self.block),
+            }
+        ]
 
 
-class FakeBoundTool:
-    def __init__(self, owner):
-        self._func = owner.reserve
+def _runtime(tmp_path: Path, tool: FakeTool | None = None) -> HermesTau2StepRuntime:
+    return HermesTau2StepRuntime(
+        tools=[tool or FakeTool()],
+        domain_policy="policy",
+        task_id="8",
+        config={"prewrite_top_k": 2},
+        hermes_repo=tmp_path,
+        memory_enabled=False,
+        trace_dir=tmp_path,
+    )
 
-    def __call__(self, **kwargs):
-        return self._func(**kwargs)
 
-
-def test_protocol_defaults_are_the_requested_airline_four_seed_cell():
+def test_protocol_defaults_are_new_step_agent_trajectory_cell():
     config = load_json(DEFAULT_CONFIG)
     assert config["domain"] == "airline"
     assert config["train_tasks"] == 30
     assert config["eval_tasks"] == 20
     assert config["seeds"] == [300, 301, 302, 303]
     assert config["max_steps"] == 200
-    assert config["simulation_timeout"] == 900
-    assert config["agent_request_timeout"] == 180
     assert config["max_retries"] == 0
-    assert config["corpus_revision"] == "async-loop-v2"
-    assert config["temperature"] == 0
-    assert config["user_simulator_policy"] == "confirmation_aware"
-    assert config["first_user_top_k"] == 4
-    assert config["prewrite_top_k"] == 2
+    assert config["corpus_revision"] == "hermes-step-agent-trajectory-v3"
+    assert config["search_memory_type"] == "trajectories"
+    assert config["train_transcript_format"] == "role_tool_blocks"
+    assert config["train_skip_failed_sessions"] is True
 
 
 def test_confirmation_aware_rule_accepts_upstream_and_wrapped_appendix():
-    upstream = (
-        "Do not end the conversation prematurely. Agreeing to an action is not "
-        "the same as the action being completed. If the agent offers to do "
-        "something, wait for the agent to confirm it is done before ending the "
-        "conversation."
+    assert _has_confirmation_aware_rule(
+        "wait for the agent to confirm it is done before ending the conversation"
     )
-    wrapped = """
-    reply with the requested confirmation but do not emit `###STOP###` in the
-    same turn.
-    """
-    assert _has_confirmation_aware_rule(upstream)
-    assert _has_confirmation_aware_rule(wrapped)
+    assert _has_confirmation_aware_rule(
+        "reply with the requested confirmation but do not emit `###STOP###` in the same turn"
+    )
 
 
-def test_speculative_tool_result_matches_tau2_container_scalar_wire_shape():
-    assert _jsonable({"count": 2, "ok": True, "ratio": 1.5, "rows": [(3, False)]}) == {
-        "count": "2",
-        "ok": "True",
-        "ratio": "1.5",
-        "rows": [["3", "False"]],
+def test_role_tool_blocks_preserve_call_identity_name_output_and_timestamp():
+    messages = [
+        {"role": "system", "content": "POLICY", "timestamp": "2026-01-01T00:00:00Z"},
+        {"role": "user", "content": "Book it", "timestamp": "2026-01-01T00:00:01Z"},
+        {
+            "role": "assistant",
+            "content": "Checking",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "book_reservation", "arguments": '{"id":"current"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": '{"ok":true}',
+            "timestamp": "2026-01-01T00:00:02Z",
+        },
+    ]
+    encoded, meta = encode_role_tool_blocks(messages)
+    rendered = "\n---\n".join(row.text for row in encoded)
+    assert "system:\nPOLICY" in rendered
+    assert "call_id: call-1" in rendered
+    assert "name: book_reservation" in rendered
+    assert 'arguments: "{\\"id\\":\\"current\\"}"' not in rendered
+    assert 'arguments: {"id": "current"}' in rendered
+    assert 'output: {"ok":true}' in rendered
+    assert encoded[-1].created_at == "2026-01-01T00:00:02Z"
+    assert meta["format"] == "role_tool_blocks"
+    assert len(meta["sha256"]) == 64
+
+
+def test_role_tool_blocks_truncate_tool_output_and_record_it():
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "c", "function": {"name": "x", "arguments": {}}}]},
+        {"role": "tool", "tool_call_id": "c", "content": "abcdefghij"},
+    ]
+    encoded, meta = encode_role_tool_blocks(messages, max_tool_output_chars=4)
+    assert "abcd... <truncated 6 chars>" in encoded[-1].text
+    assert meta["truncated_tool_outputs"] == 1
+
+
+def test_agent_memory_policy_disables_user_memory_and_working_summary():
+    assert AGENT_MEMORY_POLICY == {
+        "memory_types": ["cases", "trajectories", "experiences"],
+        "working_memory": {"enabled": False},
+        "self": {"enabled": True},
+        "peer": {"enabled": False},
     }
 
 
-def test_bound_tool_clone_cannot_mutate_formal_toolkit():
-    formal = FakeToolkit()
-    cloned = _clone_bound_tools([FakeBoundTool(formal)])[0]
-    assert cloned(value="seat") == {"rows": 1}
-    assert formal.rows == []
-    assert cloned._func.__self__ is not formal
-
-
-def test_speculative_shadow_persists_across_user_turns(monkeypatch, tmp_path):
-    """Regression: never reset the shadow DB to the stale initial snapshot."""
-    formal = FakeToolkit()
-    formal_tool = FakeBoundTool(formal)
-
-    monkeypatch.setattr(
-        "tau2_airline.hermes_agent.OpenVikingAdapter",
-        lambda _config: None,
+def test_memory_type_uri_filter_rejects_user_event_false_positive():
+    assert is_memory_type_uri(
+        "viking://user/u/memories/trajectories/book.md", "trajectories"
     )
-    runtime = HermesTau2Runtime(
-        tools=[formal_tool],
-        domain_policy="policy",
-        task_id="task",
-        config={},
-        hermes_repo=tmp_path,
-        memory_enabled=False,
-        trace_dir=tmp_path,
+    assert not is_memory_type_uri(
+        "viking://user/u/memories/events/book.md", "trajectories"
     )
 
-    formal.rows.append("task-initialization")
-    with _FormalToolTransaction([formal_tool]):
-        assert formal_tool(value="first") == {"rows": 2}
-        assert formal_tool(value="second") == {"rows": 3}
-    assert formal.rows == ["task-initialization"]
+
+def test_snapshot_does_not_count_non_trajectory_search_matches(monkeypatch):
+    adapter = OpenVikingAdapter({"search_uri": "viking://user/memories/trajectories"})
+
+    def retrieve(_query, *, limit, memory_type):
+        del limit
+        if memory_type == "trajectories":
+            return "", []
+        return "", [{"uri": "viking://user/u/memories/events/x.md"}]
+
+    monkeypatch.setattr(adapter, "retrieve", retrieve)
+    assert adapter.snapshot("trajectories")["item_count"] == 0
 
 
-def test_real_airline_shadow_preflight_is_read_only():
-    pytest.importorskip("tau2.domains.airline.environment")
-    from tau2.domains.airline.environment import get_environment
-
-    environment = get_environment()
-    before = environment.get_db_hash()
-    _preflight_airline_shadow(environment.get_tools())
-    assert environment.get_db_hash() == before
-
-
-def test_real_airline_shadow_is_cloned_after_task_initialization(tmp_path):
-    pytest.importorskip("tau2.domains.airline.environment")
-    from tau2.domains.airline.environment import get_environment, get_tasks
-
-    environment = get_environment()
-    runtime = HermesTau2Runtime(
-        tools=environment.get_tools(),
-        domain_policy=environment.get_policy(),
-        task_id="13",
-        config={},
-        hermes_repo=tmp_path,
-        memory_enabled=False,
-        trace_dir=tmp_path,
+def test_step_adapter_emits_tool_call_without_executing_business_tool(tmp_path):
+    tool = FakeTool()
+    runtime = _runtime(tmp_path, tool)
+    runtime.agent = SimpleNamespace()
+    runtime.history = [{"role": "system", "content": "policy"}]
+    monkey_result = (
+        "",
+        [{"id": "call-1", "name": tool.name, "arguments": {"id": "current"}, "requestor": "assistant"}],
+        {
+            "finish_reason": "tool_calls",
+            "usage_delta": {key: 0 for key in runtime.usage},
+            "api_calls": 1,
+            "model_latency_sec": 0.1,
+        },
     )
-    task = next(task for task in get_tasks("test") if str(task.id) == "13")
-    initial = task.initial_state
-    environment.set_state(
-        initialization_data=initial.initialization_data if initial else None,
-        initialization_actions=initial.initialization_actions if initial else None,
-        message_history=deepcopy(initial.message_history or []) if initial else [],
+    runtime._model_call = lambda extra_system=None: monkey_result  # type: ignore[method-assign]
+    content, calls, trace = runtime.next_step()
+    assert content == ""
+    assert calls[0]["name"] == "book_reservation"
+    assert tool.calls == []
+    assert trace["tool_events"][0]["executed_by_hermes"] is False
+    assert trace["adapter"] == "hermes_configured_external_step_adapter"
+
+
+def test_prewrite_recall_discards_candidate_and_regenerates_without_execution(tmp_path):
+    tool = FakeTool()
+    runtime = _runtime(tmp_path, tool)
+    runtime.memory = FakeMemory()
+    runtime.history = [{"role": "user", "content": "Book my current request"}]
+    first_trace = {
+        "usage_delta": {key: 0 for key in runtime.usage},
+        "api_calls": 1,
+        "model_latency_sec": 0.1,
+    }
+    regenerated = (
+        "verify first",
+        [],
+        {
+            "usage_delta": {key: 0 for key in runtime.usage},
+            "api_calls": 1,
+            "model_latency_sec": 0.2,
+        },
     )
-    formal_owner = runtime.tools[0]._func.__self__
-    before = formal_owner.db.model_dump_json()
-    with _FormalToolTransaction(runtime.tools):
-        formal_owner.db.reservations.clear()
-        assert formal_owner.db.model_dump_json() != before
-    assert formal_owner.db.model_dump_json() == before
+    runtime._model_call = lambda extra_system=None: regenerated  # type: ignore[method-assign]
+    content, calls, trace = runtime._apply_prewrite_recall(
+        "",
+        [{"id": "c", "name": tool.name, "arguments": {"id": "current"}}],
+        first_trace,
+    )
+    assert content == "verify first"
+    assert calls == []
+    assert tool.calls == []
+    assert trace["prewrite_retrieval"]["candidate_executed"] is False
+    assert trace["prewrite_retrieval"]["regenerated"] is True
 
 
-def test_task8_hathat_booking_transaction_matches_formal_replay():
-    pytest.importorskip("tau2.domains.airline.environment")
-    from tau2.domains.airline.environment import get_environment
+def test_tau_tool_result_is_appended_and_unknown_ids_fail(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.pending_calls["call-1"] = {
+        "id": "call-1",
+        "name": "book_reservation",
+        "arguments": {},
+    }
+    runtime.append_tool_result(
+        call_id="call-1", name="book_reservation", content='{"ok":true}'
+    )
+    assert runtime.history[-1]["role"] == "tool"
+    with pytest.raises(RuntimeError, match="unknown tool_call_id"):
+        runtime.append_tool_result(call_id="missing", name="", content="x")
 
-    environment = get_environment()
-    tools = environment.get_tools()
-    owner = tools[0]._func.__self__
-    book = next(tool for tool in tools if tool.name == "book_reservation")
-    from tools.registry import registry
 
-    bridge = TauToolBridge(tools, None, {})
-    bridge.register()
-    arguments = {
-        "user_id": "sophia_silva_7557",
-        "origin": "ORD",
-        "destination": "PHL",
-        "flight_type": "one_way",
-        "cabin": "economy",
-        "flights": [{"flight_number": "HAT271", "date": "2024-05-26"}],
-        "passengers": [
-            {"first_name": "Sophia", "last_name": "Silva", "dob": "1957-10-05"},
-            {"first_name": "Kevin", "last_name": "Smith", "dob": "2001-04-12"},
+def test_audit_memory_requires_frozen_valid_trajectory_snapshot(monkeypatch, tmp_path):
+    run_dir = tmp_path / "run"
+    paths = Paths(tmp_path, tmp_path, run_dir)
+    config = {
+        "openviking_url": "http://127.0.0.1:1933",
+        "openviking_account": "a",
+        "openviking_user": "u",
+        "search_uri": "viking://user/memories/trajectories",
+        "corpus_revision": "v3",
+    }
+    trajectory = {
+        "item_count": 1,
+        "sha256": "t",
+        "items": [
+            {
+                "uri": "viking://user/u/memories/trajectories/x.md",
+                "text_chars": 100,
+                "contract_valid": True,
+            }
         ],
-        "payment_methods": [{"payment_id": "certificate_8045380", "amount": 348}],
-        "total_baggages": 0,
-        "nonfree_baggages": 0,
-        "insurance": "no",
     }
+    experience = {"item_count": 0, "sha256": "e", "items": []}
+    write_json(
+        paths.corpus / "corpus_manifest.json",
+        {"config": config, "trajectory_snapshot": trajectory, "experience_snapshot": experience},
+    )
 
-    def seats():
-        return owner.db.flights["HAT271"].dates["2024-05-26"].available_seats["economy"]
+    class Adapter:
+        write_count = 0
+        session_commit_count = 0
 
-    assert seats() == 3
-    with _FormalToolTransaction(tools):
-        speculative = json.loads(registry.dispatch("book_reservation", arguments))
-        assert seats() == 1
-    assert seats() == 3
-    formal = _jsonable(book(**arguments))
-    assert formal == speculative
-    assert seats() == 1
+        def __init__(self, _config):
+            pass
+
+        def snapshot(self, kind):
+            return trajectory if kind == "trajectories" else experience
+
+    monkeypatch.setattr("tau2_airline.pipeline.OpenVikingAdapter", Adapter)
+    assert audit_memory(paths, config)["verified"] is True
 
 
 def test_invalid_cached_cell_is_costed_and_quarantined(tmp_path):
     output = tmp_path / "cells" / "airline_openviking_seed300.json"
     output.parent.mkdir()
-    checkpoint = output.with_suffix("")
-    traces = output.parent / f"{output.stem}_hermes_traces"
-    checkpoint.mkdir()
-    traces.mkdir()
-    data = {
-        "simulations": [
+    output.write_text(
+        json.dumps(
             {
-                "messages": [
+                "simulations": [
                     {
-                        "raw_data": {
-                            "hermes_messages_delta": [],
-                            "usage_delta": {
-                                "input_tokens": 100,
-                                "output_tokens": 20,
-                                "total_tokens": 120,
-                            },
-                            "api_calls": 2,
-                            "hermes_turn_latency_sec": 3.5,
-                            "tool_events": [
-                                {"executed": True, "speculative_replay_match": False}
-                            ],
-                        }
+                        "messages": [
+                            {
+                                "raw_data": {
+                                    "adapter": "hermes_configured_external_step_adapter",
+                                    "usage_delta": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+                                    "api_calls": 2,
+                                    "model_latency_sec": 3.5,
+                                    "tool_events": [{"emitted_to_tau": True, "executed_by_hermes": False}],
+                                }
+                            }
+                        ]
                     }
                 ]
             }
-        ]
-    }
-    output.write_text(json.dumps(data), encoding="utf-8")
-    assert len(_replay_mismatch_events(data)) == 1
-    cost = _cell_runtime_cost(data)
+        ),
+        encoding="utf-8",
+    )
+    cost = _cell_runtime_cost(json.loads(output.read_text()))
     assert cost["total_tokens"] == 120
     assert cost["tool_calls"] == 1
-
-    _quarantine_invalid_cell(output, "test mismatch", cost)
+    _quarantine_invalid_cell(output, "test", cost)
     assert not output.exists()
-    invalid = list((tmp_path / "invalid_cells").glob("airline_openviking_seed300-*"))
-    assert len(invalid) == 1
-    assert (invalid[0] / output.name).is_file()
-    assert (invalid[0] / checkpoint.name).is_dir()
-    assert (invalid[0] / traces.name).is_dir()
+    assert len(list((tmp_path / "invalid_cells").iterdir())) == 1
 
 
 def test_infrastructure_error_cells_are_never_reusable():
     data = {
         "simulations": [
             {"termination_reason": "user_stop", "info": {}},
-            {
-                "termination_reason": "infrastructure_error",
-                "info": {"error": "fatal replay mismatch"},
-            },
+            {"termination_reason": "infrastructure_error", "info": {"error": "boom"}},
         ]
     }
     assert _infrastructure_error_count(data) == 1
 
 
-def test_prewrite_memory_blocks_first_write_then_allows_reissued_call():
-    tool = FakeTool()
-    memory = FakeMemory()
-    bridge = TauToolBridge([tool], memory, {"prewrite_top_k": 2})
-    bridge.start_user_turn(1)
-    first = bridge._execute(tool, {"id": "current-task"})
-    assert "NOT executed" in first
-    assert tool.calls == []
-    second = bridge._execute(tool, {"id": "current-task"})
-    assert json.loads(second) == {"ok": "True"}
-    assert tool.calls == [{"id": "current-task"}]
-    assert memory.queries[0][1] == 2
-
-
 def test_baseline_prompt_contains_no_retrieved_memory():
     prompt = _system_prompt("POLICY", "SCOPE", None)
     assert "No OpenViking experience memory is enabled" in prompt
-    assert "POLICY" in prompt
-    assert "SCOPE" in prompt
 
 
 def test_secrets_are_not_persisted_in_public_config():
-    public = _public_config(
-        {
-            "agent_model": "m",
-            "agent_api_key": "secret-a",
-            "openviking_api_key": "secret-b",
-        }
-    )
-    assert public == {"agent_model": "m"}
+    assert _public_config(
+        {"agent_model": "m", "agent_api_key": "a", "openviking_api_key": "b"}
+    ) == {"agent_model": "m"}
 
 
 def test_deterministic_json_hash_ignores_mapping_order():
     assert sha256_json({"a": 1, "b": 2}) == sha256_json({"b": 2, "a": 1})
 
 
-def test_report_builds_paired_accuracy_token_tool_and_timing_metrics(tmp_path):
+def test_report_builds_paired_step_adapter_metrics(tmp_path):
     run_dir = tmp_path / "run"
     cells = run_dir / "cells"
     cells.mkdir(parents=True)
-    cell_rows = []
+    rows = []
     for arm, reward in (("no_memory", 0.0), ("openviking", 1.0)):
         path = cells / f"{arm}.json"
         path.write_text(
@@ -353,11 +361,11 @@ def test_report_builds_paired_accuracy_token_tool_and_timing_metrics(tmp_path):
                                 {
                                     "role": "assistant",
                                     "raw_data": {
-                                        "hermes_messages_delta": [],
+                                        "adapter": "hermes_configured_external_step_adapter",
                                         "usage_delta": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
-                                        "tool_events": [{"executed": True, "name": "search"}],
+                                        "tool_events": [{"emitted_to_tau": True, "executed_by_hermes": False}],
                                         "api_calls": 1,
-                                        "hermes_turn_latency_sec": 2.0,
+                                        "model_latency_sec": 2.0,
                                     },
                                 }
                             ],
@@ -367,14 +375,28 @@ def test_report_builds_paired_accuracy_token_tool_and_timing_metrics(tmp_path):
             ),
             encoding="utf-8",
         )
-        cell_rows.append({"arm": arm, "seed": 300, "path": str(path), "simulations": 1})
-    (run_dir / "eval_manifest.json").write_text(
-        json.dumps({"protocol": "p", "read_only_verified": True, "cells": cell_rows}),
-        encoding="utf-8",
+        rows.append({"arm": arm, "seed": 300, "path": str(path), "simulations": 1})
+    write_json(
+        run_dir / "eval_manifest.json",
+        {
+            "protocol": "p",
+            "adapter": "hermes_configured_external_step_adapter",
+            "read_only_verified": True,
+            "openviking_eval_write_operations": 0,
+            "cells": rows,
+        },
+    )
+    write_json(
+        run_dir / "corpus" / "corpus_manifest.json",
+        {
+            "committed_count": 2,
+            "skipped_failed_count": 1,
+            "trajectory_snapshot": {"item_count": 2},
+            "experience_snapshot": {"item_count": 1},
+        },
     )
     summary = report(Paths(tmp_path, tmp_path, run_dir))
     assert summary["delta_accuracy_pp"] == 100.0
     assert summary["arms"]["openviking"]["tool_calls"] == 1
     assert summary["arms"]["openviking"]["tokens"]["total_tokens"] == 12
-    assert summary["arms"]["openviking"]["average_simulation_duration_sec"] == 3.0
     assert summary["paired"] == {"wins": 1, "losses": 0, "ties": 0, "pair_count": 1}

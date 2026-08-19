@@ -157,6 +157,7 @@ def test_config_is_profile_scoped_and_excludes_secrets(monkeypatch, tmp_path):
         {
             "endpoint": "http://memory.internal:8420",
             "auto_start": "false",
+            "read_only": "true",
             "recall_limit": "99",
             "request_timeout": "0.01",
             "write_timeout": "999",
@@ -171,6 +172,7 @@ def test_config_is_profile_scoped_and_excludes_secrets(monkeypatch, tmp_path):
     saved = json.loads((tmp_path / "memory_tencentdb.json").read_text(encoding="utf-8"))
     assert saved["endpoint"] == "http://memory.internal:8420"
     assert saved["auto_start"] is False
+    assert saved["read_only"] is True
     assert saved["recall_limit"] == 20
     assert saved["request_timeout"] == 0.2
     assert saved["write_timeout"] == 60.0
@@ -181,6 +183,7 @@ def test_config_is_profile_scoped_and_excludes_secrets(monkeypatch, tmp_path):
 
     cfg = load_config(tmp_path)
     assert cfg["service_id"] == "space-a"
+    assert cfg["read_only"] is True
 
 
 def test_setup_schema_is_minimal_and_keeps_gateway_secret_out_of_json():
@@ -630,6 +633,49 @@ def test_non_primary_agent_contexts_can_recall_but_cannot_write(
         instance.shutdown()
 
 
+def test_profile_read_only_mode_recalls_but_omits_and_rejects_mutating_tools(
+    monkeypatch, tmp_path
+):
+    save_config({"read_only": True}, tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(tdai, "GatewaySupervisor", FakeSupervisor)
+    instance = tdai.MemoryTencentdbProvider()
+    instance.initialize(
+        "session-read-only",
+        hermes_home=str(tmp_path),
+        platform="cli",
+        user_id="user-a",
+        agent_identity="coder",
+        agent_workspace="project-a",
+    )
+    try:
+        assert "MySQL" in instance.prefetch("database")
+        assert instance._write_enabled is False
+        tool_names = {schema["name"] for schema in instance.get_tool_schemas()}
+        assert tool_names == {
+            "memory_tencentdb_memory_search",
+            "memory_tencentdb_conversation_search",
+            "memory_tencentdb_read_scene",
+            "memory_tencentdb_profile",
+        }
+        instance.sync_turn("must", "not persist")
+        instance.on_session_end([])
+        assert not [
+            call
+            for call in instance._client.calls
+            if call[0] in {"conversation_add", "end_session"}
+        ]
+        rejected = json.loads(
+            instance.handle_tool_call(
+                "memory_tencentdb_remember", {"content": "must not persist"}
+            )
+        )
+        assert "read-only" in rejected["error"]
+        assert "read-only" in instance.system_prompt_block()
+    finally:
+        instance.shutdown()
+
+
 def test_backup_path_uses_profile_configured_data_dir(monkeypatch, tmp_path):
     data_dir = tmp_path / "tdai-data"
     save_config({"data_dir": str(data_dir)}, tmp_path)
@@ -846,6 +892,7 @@ def test_real_http_client_flushes_legacy_session_endpoint(local_gateway):
     assert request["path"] == "/session/end"
     assert request["body"] == {
         "session_key": "session-http",
+        "instance_id": "default",
         "user_id": "user-http",
     }
 

@@ -9,14 +9,25 @@ import sys
 from pathlib import Path
 
 from tau2_airline.config import DEFAULT_CONFIG, ROOT, load_json, require_runtime, resolve_paths
-from tau2_airline.pipeline import bootstrap, build_corpus, evaluate, report, smoke_replay
+from tau2_airline.pipeline import (
+    audit_memory,
+    bootstrap,
+    build_corpus,
+    diagnose_single_tool_execution,
+    evaluate,
+    report,
+    smoke_replay,
+)
 
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Hermes × TAU-2 Airline × OpenViking benchmark")
     p.add_argument(
         "phase",
-        choices=["preflight", "bootstrap", "build", "smoke", "eval", "report", "all"],
+        choices=[
+            "preflight", "bootstrap", "build", "audit-memory", "diagnose-tools",
+            "smoke", "eval", "report", "all",
+        ],
     )
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--run-dir", type=Path, required=True)
@@ -59,9 +70,10 @@ def main() -> int:
     args = parser().parse_args()
     cfg = runtime_config(args)
     paths = resolve_paths(args)
-    need_ov = args.phase in {"build", "smoke", "eval", "all"} and not args.offline
+    need_ov = args.phase in {"build", "audit-memory", "smoke", "eval", "all"} and not args.offline
     require_runtime(paths, need_openviking=need_ov)
-    if args.phase != "report" and not cfg.get("agent_api_key") and not args.offline:
+    llm_phases = {"bootstrap", "build", "smoke", "eval", "all"}
+    if args.phase in llm_phases and not cfg.get("agent_api_key") and not args.offline:
         raise RuntimeError("Set HERMES_AGENT_API_KEY (or OPENAI_API_KEY); keys are never written to artifacts")
     if need_ov:
         probe_openviking(cfg["openviking_url"])
@@ -69,8 +81,18 @@ def main() -> int:
     print(f"  Hermes source: {paths.hermes_repo / 'run_agent.py'}")
     print(f"  TAU-2 source:  {paths.tau2_repo}")
     print(f"  run directory: {paths.run_dir}")
-    print(f"  OpenViking:    {cfg['openviking_url']} (contacted only in build/eval)")
+    print(f"  OpenViking:    {cfg['openviking_url']} (contacted in build/audit/smoke/eval)")
     if args.phase == "preflight":
+        if not args.offline:
+            import inspect
+            import openviking as ov
+
+            signature = inspect.signature(ov.AsyncHTTPClient.create_session)
+            if "memory_policy" not in signature.parameters:
+                raise RuntimeError(
+                    "Installed OpenViking SDK lacks create_session(memory_policy=...); "
+                    "Agent trajectory build is unsupported"
+                )
         print("PASS: preflight completed" + (" (offline)" if args.offline else ""))
         return 0
     if args.phase in {"bootstrap", "all"}:
@@ -79,6 +101,19 @@ def main() -> int:
     if args.phase in {"build", "all"}:
         result = build_corpus(paths, cfg, force=args.force)
         print(f"PASS build: committed {result['committed_count']} successful training trajectories")
+    if args.phase == "audit-memory":
+        result = audit_memory(paths, cfg)
+        print(
+            "PASS audit-memory: "
+            f"trajectories={result['trajectory_snapshot']['item_count']} "
+            f"experiences={result['experience_snapshot']['item_count']}"
+        )
+    if args.phase == "diagnose-tools":
+        result = diagnose_single_tool_execution(paths, cfg)
+        print(
+            "PASS diagnose-tools: task8 book_reservation emitted by Hermes Step Adapter, "
+            f"executed exactly once by TAU-2; seats {result['seats_before']}->{result['seats_after']}"
+        )
     if args.phase == "smoke":
         result = smoke_replay(paths, cfg)
         print(

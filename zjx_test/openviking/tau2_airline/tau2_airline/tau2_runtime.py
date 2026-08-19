@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import write_json
-from .hermes_agent import HermesState, HermesTau2Runtime
+from .hermes_agent import HermesState, HermesTau2StepRuntime
 
 
 AGENT_NAME = "hermes_tau2_airline_agent"
@@ -88,15 +88,6 @@ def _scenario_sha(value: Any) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
-def _normalized_tool_result(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value.strip()
-
-
 def _register_agent() -> None:
     from tau2.agent.base_agent import HalfDuplexAgent
     from tau2.data_model.message import AssistantMessage, MultiToolMessage, ToolCall, ToolMessage
@@ -105,15 +96,9 @@ def _register_agent() -> None:
     class HermesAgent(HalfDuplexAgent[HermesState]):
         def __init__(self, tools, domain_policy, **kwargs):
             super().__init__(tools=tools, domain_policy=domain_policy)
-            fatal = _RUNTIME.get("fatal_replay_error")
-            if fatal:
-                raise RuntimeError(
-                    "A prior Hermes/TAU-2 replay mismatch aborted this cell before "
-                    f"further model calls: {fatal}"
-                )
             task = kwargs.get("task")
             task_id = str(getattr(task, "id", "unknown"))
-            self.runtime = HermesTau2Runtime(
+            self.runtime = HermesTau2StepRuntime(
                 tools=tools,
                 domain_policy=domain_policy,
                 task_id=task_id,
@@ -129,79 +114,40 @@ def _register_agent() -> None:
         def generate_next_message(self, message, state):
             if isinstance(message, (ToolMessage, MultiToolMessage)):
                 tool_messages = message.tool_messages if isinstance(message, MultiToolMessage) else [message]
-                expected = state.replay_queue.pop(0) if state.replay_queue else None
-                if expected is None:
-                    raise RuntimeError("TAU-2 returned a tool result with no Hermes replay call pending")
-                actual_results = [str(item.content or "") for item in tool_messages]
-                expected["tau2_tool_results"] = actual_results
-                expected["speculative_replay_match"] = (
-                    len(actual_results) == 1
-                    and _normalized_tool_result(actual_results[0])
-                    == _normalized_tool_result(expected.get("result"))
-                )
-                if not expected["speculative_replay_match"]:
-                    details = json.dumps(
-                        {
-                            "name": expected.get("name"),
-                            "arguments": expected.get("arguments"),
-                            "speculative": expected.get("result"),
-                            "tau2": actual_results,
-                        },
-                        ensure_ascii=False,
-                        default=str,
+                for item in tool_messages:
+                    call_id = str(
+                        getattr(item, "id", None)
+                        or getattr(item, "tool_call_id", None)
+                        or ""
                     )
-                    _RUNTIME["fatal_replay_error"] = details
-                    write_json(
-                        Path(_RUNTIME["trace_dir"]) / "fatal_replay_mismatch.json",
-                        {
-                            "error": "speculative_formal_replay_mismatch",
-                            "details": json.loads(details),
-                        },
+                    self.runtime.append_tool_result(
+                        call_id=call_id,
+                        name=str(getattr(item, "name", "") or ""),
+                        content=str(item.content or ""),
                     )
-                    raise RuntimeError(
-                        "Hermes speculative Airline tool result diverged immediately from "
-                        "TAU-2 formal replay; aborting this simulation before further model "
-                        "calls. " + details
-                    )
-                if state.replay_queue:
-                    return self._next_replay_message(state), state
-                final = AssistantMessage(
-                    role="assistant",
-                    content=state.replay_final_response or "",
-                    raw_data=state.replay_final_trace,
-                )
-                state.replay_final_response = None
-                state.replay_final_trace = None
-                return final, state
-            if isinstance(message, MultiToolMessage):
-                text = "\n".join(str(item.content or "") for item in message.tool_messages)
+                first_user = None
             else:
                 text = str(getattr(message, "content", "") or "")
-            response, state, trace = self.runtime.respond(text, state)
-            replay = [event for event in trace.get("tool_events") or [] if event.get("executed")]
-            if not replay:
-                return AssistantMessage(role="assistant", content=response, raw_data=trace), state
-            state.replay_queue = replay
-            state.replay_final_response = response
-            state.replay_final_trace = trace
-            return self._next_replay_message(state), state
-
-        @staticmethod
-        def _next_replay_message(state):
-            event = state.replay_queue[0]
-            call_id = f"hermes-tau2-{state.user_turn}-{len(state.replay_queue)}"
+                state.user_turn += 1
+                first_user = text if not state.first_user_seen else None
+                state.first_user_seen = True
+                if first_user is None:
+                    self.runtime.append_user(text)
+            response, calls, trace = self.runtime.next_step(first_user=first_user)
             return AssistantMessage(
                 role="assistant",
+                content=response,
                 tool_calls=[
                     ToolCall(
-                        id=call_id,
-                        name=event["name"],
-                        arguments=event["arguments"],
-                        requestor="assistant",
+                        id=call["id"],
+                        name=call["name"],
+                        arguments=call["arguments"],
+                        requestor=call.get("requestor", "assistant"),
                     )
+                    for call in calls
                 ],
-                raw_data={"hermes_speculative_replay": True, "write_like": event.get("write_like")},
-            )
+                raw_data=trace,
+            ), state
 
     def factory(tools, domain_policy, **kwargs):
         return HermesAgent(tools=tools, domain_policy=domain_policy, **kwargs)
@@ -317,12 +263,6 @@ def run_cell(
             max_retries=int(config.get("max_retries", 0)),
         )
     )
-    fatal = _RUNTIME.get("fatal_replay_error")
-    if fatal:
-        raise RuntimeError(
-            "TAU-2 cell aborted on the first speculative/formal replay mismatch; "
-            f"remaining tasks were blocked before Hermes model calls: {fatal}"
-        )
     compat = run_dir / "results.json"
     if compat.is_file():
         shutil.copyfile(compat, output)

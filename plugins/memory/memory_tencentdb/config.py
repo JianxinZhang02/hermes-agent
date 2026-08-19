@@ -107,6 +107,7 @@ def load_config(hermes_home: str | Path | None = None) -> dict[str, Any]:
         "agent_id": str(raw.get("agent_id") or "").strip(),
         "user_id": str(raw.get("user_id") or "").strip(),
         "auto_start": _as_bool(raw.get("auto_start"), True),
+        "read_only": _as_bool(raw.get("read_only"), False),
         "recall_limit": _as_int(
             raw.get("recall_limit"), DEFAULT_RECALL_LIMIT, minimum=1, maximum=20
         ),
@@ -156,6 +157,7 @@ def save_config(values: dict[str, Any], hermes_home: str | Path) -> None:
         "agent_id",
         "user_id",
         "auto_start",
+        "read_only",
         "recall_limit",
         "request_timeout",
         "write_timeout",
@@ -168,6 +170,8 @@ def save_config(values: dict[str, Any], hermes_home: str | Path) -> None:
             continue
         if key == "auto_start":
             existing[key] = _as_bool(value, True)
+        elif key == "read_only":
+            existing[key] = _as_bool(value, False)
         elif key == "recall_limit":
             existing[key] = _as_int(value, DEFAULT_RECALL_LIMIT, minimum=1, maximum=20)
         elif key == "request_timeout":

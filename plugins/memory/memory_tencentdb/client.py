@@ -671,6 +671,9 @@ class MemoryTencentdbSdkClient:
         self,
         session_key: str,
         user_id: str = "",
+        team_id: str = "",
+        agent_id: str = "",
+        force: bool = False,
         *,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
@@ -682,9 +685,18 @@ class MemoryTencentdbSdkClient:
         """
         if not str(session_key).strip():
             raise ValueError("end_session requires session_key")
-        body: Dict[str, Any] = {"session_key": session_key}
+        body: Dict[str, Any] = {
+            "session_key": session_key,
+            "instance_id": self._service_id,
+        }
         if user_id:
             body["user_id"] = user_id
+        if team_id:
+            body["team_id"] = team_id
+        if agent_id:
+            body["agent_id"] = agent_id
+        if force:
+            body["force"] = True
         return self._post("/session/end", body, timeout=timeout, unwrap_v3=False)
 
     def seed(

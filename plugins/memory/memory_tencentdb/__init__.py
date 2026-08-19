@@ -672,6 +672,8 @@ class MemoryTencentdbProvider(MemoryProvider):
         agent_context = str(kwargs.get("agent_context") or "").strip().lower()
         platform = str(kwargs.get("platform") or "").strip().lower()
         self._write_enabled = (
+            not bool(self._config.get("read_only"))
+            and
             agent_context not in _NON_PRIMARY_CONTEXTS and platform != "cron"
         )
         self._fixed_user_id = str(self._config.get("user_id") or "")
@@ -780,7 +782,7 @@ class MemoryTencentdbProvider(MemoryProvider):
         self._start_watchdog()
 
     def system_prompt_block(self) -> str:
-        return (
+        block = (
             "# memory-tencentdb Memory\n"
             "Active for the current Hermes provider scopes.\n"
             "Four-layer memory system (L0→L1→L2→L3) with automatic conversation "
@@ -789,6 +791,9 @@ class MemoryTencentdbProvider(MemoryProvider):
             "memory_tencentdb_conversation_search to search raw conversation history, "
             "memory_tencentdb_read_scene to read detailed scene content."
         )
+        if not self._write_enabled:
+            block += "\nThis provider is read-only for the current execution context."
+        return block
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         return self._prefetch_scoped(
@@ -1122,22 +1127,22 @@ class MemoryTencentdbProvider(MemoryProvider):
         # The tool set must be byte-stable for the life of a conversation.
         # Gateway readiness may change asynchronously, so it must never decide
         # which schemas are advertised after MemoryManager registration.
-        return [
+        schemas = [
             MEMORY_SEARCH_SCHEMA,
             CONVERSATION_SEARCH_SCHEMA,
-            REMEMBER_SCHEMA,
-            UPDATE_SCHEMA,
-            FORGET_SCHEMA,
             READ_SCENE_SCHEMA,
             PROFILE_SCHEMA,
         ]
+        if self._write_enabled:
+            schemas[2:2] = [REMEMBER_SCHEMA, UPDATE_SCHEMA, FORGET_SCHEMA]
+        return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name in _MUTATING_TOOLS and not self._write_enabled:
             return json.dumps({
                 "error": (
-                    "memory-tencentdb writes are disabled in cron, flush, "
-                    "and subagent execution contexts"
+                    "memory-tencentdb writes are disabled in this read-only "
+                    "execution context"
                 )
             })
         self._ensure_alive_for_request()
@@ -1355,6 +1360,8 @@ class MemoryTencentdbProvider(MemoryProvider):
             result = self._client.end_session(
                 session_key=self._session_id,
                 user_id=self._user_id,
+                team_id=self._team_id,
+                agent_id=self._agent_id,
                 timeout=float(self._config.get("session_flush_timeout") or 30.0),
             )
             if result.get("flushed") is not True:
