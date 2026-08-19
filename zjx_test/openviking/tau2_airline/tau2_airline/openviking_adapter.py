@@ -444,9 +444,46 @@ class OpenVikingAdapter:
             print(f"      repair-index: server reindex failed: {reindex_error}", flush=True)
 
         snapshot = self.snapshot(memory_type)
+        semantic_reindex_result: dict[str, Any] | None = None
+        semantic_reindex_error: str | None = None
+        if int(snapshot.get("item_count", 0)) <= 0:
+            print(
+                "      repair-index: leaf vectors exist but hierarchical search is empty; "
+                "regenerating directory semantics",
+                flush=True,
+            )
+
+            async def semantic_reindex() -> dict[str, Any]:
+                client = self._async_client()
+                await client.initialize()
+                try:
+                    return await client.reindex(
+                        uri=target_uri,
+                        mode="semantic_and_vectors",
+                        wait=True,
+                        dry_run=False,
+                    )
+                finally:
+                    await client.close()
+
+            try:
+                semantic_reindex_result = self._run_async(semantic_reindex)
+            except Exception as exc:
+                semantic_reindex_error = f"{type(exc).__name__}: {exc}"
+                print(
+                    f"      repair-index: semantic reindex failed: {semantic_reindex_error}",
+                    flush=True,
+                )
+            snapshot = self.snapshot(memory_type)
+
         fallback_rewrites = 0
         fallback_errors: list[dict[str, str]] = []
-        if int(snapshot.get("item_count", 0)) <= 0:
+        vectors_rebuilt = int((reindex_result or {}).get("rebuilt_records", 0) or 0)
+        if (
+            int(snapshot.get("item_count", 0)) <= 0
+            and vectors_rebuilt <= 0
+            and semantic_reindex_result is None
+        ):
             async def rewrite_leaves() -> None:
                 nonlocal fallback_rewrites
                 client = self._async_client()
@@ -481,6 +518,8 @@ class OpenVikingAdapter:
             "discovered_files": len(leaves),
             "reindex_result": reindex_result,
             "reindex_error": reindex_error,
+            "semantic_reindex_result": semantic_reindex_result,
+            "semantic_reindex_error": semantic_reindex_error,
             "fallback_rewrites": fallback_rewrites,
             "fallback_errors": fallback_errors,
             "snapshot": snapshot,
