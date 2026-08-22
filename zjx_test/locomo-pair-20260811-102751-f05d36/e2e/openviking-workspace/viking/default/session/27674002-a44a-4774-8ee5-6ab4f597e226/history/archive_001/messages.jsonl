@@ -1,2 +1,0 @@
-{"id": "msg_1c7efcc92e444c30916641ea2d59287a", "role": "user", "parts": [{"type": "text", "text": "OpenViking memory provider warmup. Acknowledge with OK."}], "created_at": "2026-08-11T05:47:55.856530+00:00"}
-{"id": "msg_4b1a4d38089d4505b7cc35f8914aaa44", "role": "assistant", "parts": [{"type": "text", "text": "OK"}], "created_at": "2026-08-11T05:47:55.856557+00:00", "peer_id": "hermes"}
