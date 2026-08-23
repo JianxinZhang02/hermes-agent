@@ -142,7 +142,7 @@ from model_tools import (
     handle_function_call,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.handle_function_call")
     check_toolset_requirements,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.check_toolset_requirements")
 )
-from tools.terminal_tool import cleanup_vm, get_active_env
+from tools.terminal_tool import cleanup_vm
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 
@@ -7446,38 +7446,15 @@ class AIAgent:
         segment in emission order so safe subsets still run concurrently
         while side-effect ordering is preserved.
         """
-        tool_calls = assistant_message.tool_calls
+        from agent.tool_executor import execute_tool_call_batch
 
-        # Allow _vprint during tool execution even with stream consumers
-        self._executing_tools = True
-        try:
-            if len(tool_calls) <= 1:
-                return self._execute_tool_calls_sequential(
-                    assistant_message, messages, effective_task_id, api_call_count
-                )
-
-            from agent.tool_dispatch_helpers import _plan_tool_batch_segments
-            _active_env = get_active_env(effective_task_id)
-            _exec_cwd = Path(_active_env.cwd) if _active_env is not None and _active_env.cwd else None
-            segments = _plan_tool_batch_segments(tool_calls, execution_cwd=_exec_cwd)
-
-            if len(segments) == 1:
-                kind = segments[0][0]
-                if kind == "parallel":
-                    return self._execute_tool_calls_concurrent(
-                        assistant_message, messages, effective_task_id, api_call_count
-                    )
-                return self._execute_tool_calls_sequential(
-                    assistant_message, messages, effective_task_id, api_call_count
-                )
-
-            from agent.tool_executor import execute_tool_calls_segmented
-            return execute_tool_calls_segmented(
-                self, assistant_message, messages, effective_task_id, api_call_count,
-                segments=segments,
-            )
-        finally:
-            self._executing_tools = False
+        return execute_tool_call_batch(
+            self,
+            assistant_message,
+            messages,
+            effective_task_id,
+            api_call_count,
+        )
 
     def _dispatch_delegate_task(self, function_args: dict) -> str:
         """Single call site for delegate_task dispatch.
@@ -7704,6 +7681,22 @@ class AIAgent:
                     persist_user_display_kind=persist_user_display_kind,
                     persist_user_display_metadata=persist_user_display_metadata,
                     moa_config=moa_config,
+                )
+            if isinstance(result, dict):
+                result.setdefault(
+                    "plan_ir",
+                    getattr(self, "_last_plan_ir_metadata", None)
+                    or {
+                        "attempted": False,
+                        "used": False,
+                        "route_reason": "not_reached",
+                        "outcome": "native",
+                        "fallback_reason": None,
+                    },
+                )
+                result.setdefault(
+                    "provider_calls_total",
+                    result.get("api_calls"),
                 )
             terminal = result if isinstance(result, dict) else {}
             if terminal.get("interrupted") is True:

@@ -7355,7 +7355,7 @@ def _resolve_task_provider_model(
     # Goal Judge receives current-turn tool evidence. Keep endpoint and key on
     # the active main-model trust boundary; configuration may select another
     # model on that same API but may not silently reroute evidence elsewhere.
-    if task == "goal_judge" and not provider and not base_url and not api_key:
+    if task in {"goal_judge", "plan_ir_planner", "plan_ir_finalizer"} and not provider and not base_url and not api_key:
         return (
             "main",
             resolved_model or _read_main_model() or None,

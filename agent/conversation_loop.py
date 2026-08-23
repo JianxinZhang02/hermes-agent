@@ -1400,6 +1400,96 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
+    # Experimental native PlanIR runs after the turn context is fully built,
+    # but before the ReAct loop. Local rejection is free; any planner,
+    # execution, handoff, or finalizer failure falls through into this same
+    # turn without appending a second user row.
+    _plan_ir_metadata: Dict[str, Any] = {
+        "attempted": False,
+        "used": False,
+        "route_reason": "disabled",
+        "outcome": "native",
+        "fallback_reason": None,
+        "node_count": 0,
+        "batch_count": 0,
+        "longest_depth": 0,
+        "planner_usage": None,
+        "finalizer_usage": None,
+        "events": [],
+    }
+    agent._last_plan_ir_metadata = _plan_ir_metadata
+    _plan_ir_attempt = None
+    try:
+        from hermes_cli.config import load_config_readonly
+        from agent.plan_ir import run_plan_ir_turn
+        from agent.plan_ir.router import load_plan_ir_config, route_locally
+
+        _plan_ir_config, _plan_ir_config_error = load_plan_ir_config(
+            load_config_readonly() or {}
+        )
+        _plan_ir_route = route_locally(
+            user_message,
+            config=_plan_ir_config,
+            available_tools=tuple(getattr(agent, "valid_tool_names", set())),
+            has_history=bool(conversation_history)
+            or persist_user_display_kind == "auto_continue",
+            is_subagent=getattr(agent, "_delegate_depth", 0) > 0
+            or getattr(agent, "_memory_write_context", "") == "background_review",
+            moa_active=bool(moa_config),
+            api_mode=getattr(agent, "api_mode", ""),
+            remaining_iterations=agent.iteration_budget.remaining,
+        )
+        _plan_ir_metadata["route_reason"] = (
+            _plan_ir_config_error or _plan_ir_route.reason_code
+        )
+        if _plan_ir_route.eligible:
+            _plan_ir_attempt = run_plan_ir_turn(
+                agent,
+                user_message=user_message,
+                messages=messages,
+                effective_task_id=effective_task_id,
+                config=_plan_ir_config,
+            )
+            api_call_count += _plan_ir_attempt.provider_calls
+            _plan_ir_metadata = _plan_ir_attempt.metadata
+            agent._last_plan_ir_metadata = _plan_ir_metadata
+    except Exception as _plan_ir_exc:
+        logger.warning("Native PlanIR disabled for this turn: %s", _plan_ir_exc)
+        _plan_ir_metadata.update(
+            {
+                "attempted": True,
+                "route_reason": "runtime_exception",
+                "outcome": "fallback",
+                "fallback_reason": "runtime_exception",
+            }
+        )
+        agent._last_plan_ir_metadata = _plan_ir_metadata
+    if _plan_ir_attempt is not None and _plan_ir_attempt.handled:
+        final_response = _plan_ir_attempt.final_response
+        _turn_exit_reason = "text_response(plan_ir)"
+        from agent.turn_finalizer import finalize_turn
+
+        _plan_ir_result = finalize_turn(
+            agent,
+            final_response=final_response,
+            api_call_count=api_call_count,
+            interrupted=interrupted,
+            failed=failed,
+            messages=messages,
+            conversation_history=conversation_history,
+            effective_task_id=effective_task_id,
+            turn_id=turn_id,
+            user_message=user_message,
+            original_user_message=original_user_message,
+            _should_review_memory=_should_review_memory,
+            _turn_exit_reason=_turn_exit_reason,
+            _pending_verification_response=_pending_verification_response,
+            _pending_verification_response_previewed=_pending_verification_response_previewed,
+        )
+        _plan_ir_result["plan_ir"] = _plan_ir_metadata
+        _plan_ir_result["provider_calls_total"] = api_call_count
+        return _plan_ir_result
+
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         _redirect_text = agent._drain_pending_redirect()
         if _redirect_text:
@@ -7197,7 +7287,7 @@ def run_conversation(
     # (god-file decomposition Phase 1 step 4). Behavior-neutral: the assembled
     # result dict is returned exactly as before.
     from agent.turn_finalizer import finalize_turn
-    return finalize_turn(
+    _turn_result = finalize_turn(
         agent,
         final_response=final_response,
         api_call_count=api_call_count,
@@ -7214,6 +7304,9 @@ def run_conversation(
         _pending_verification_response=_pending_verification_response,
         _pending_verification_response_previewed=_pending_verification_response_previewed,
     )
+    _turn_result["plan_ir"] = _plan_ir_metadata
+    _turn_result["provider_calls_total"] = api_call_count
+    return _turn_result
 
 
 

@@ -30,6 +30,19 @@ DEFAULT_CONFIG = {
     "max_live_sessions": 16,
     "agent": {
         "max_turns": 500,
+        # Experimental native PlanIR. Disabled by default and deliberately
+        # restricted to static, local, read-only multi-tool turns.
+        "plan_ir": {
+            "enabled": False,
+            "routing": "conservative",
+            "allowed_tools": ["read_file", "search_files"],
+            "max_nodes": 8,
+            "max_concurrency": 4,
+            "node_timeout_seconds": 30,
+            "planner_max_tokens": 2048,
+            "finalizer_max_tokens": 4096,
+            "max_observation_chars": 12000,
+        },
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has
@@ -997,6 +1010,22 @@ DEFAULT_CONFIG = {
             "timeout": 60,
             "extra_body": {},
             "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
+        },
+        # PlanIR phases inherit the active main endpoint, credentials and
+        # provider. Only the model may be changed on that same trust boundary.
+        "plan_ir_planner": {
+            "provider": "main",
+            "model": "",
+            "timeout": 60,
+            "extra_body": {},
+            "reasoning_effort": "",
+        },
+        "plan_ir_finalizer": {
+            "provider": "main",
+            "model": "",
+            "timeout": 60,
+            "extra_body": {},
+            "reasoning_effort": "",
         },
         # Curator — skill-usage review fork. Timeout is generous because the
         # review pass can take several minutes on reasoning models (umbrella

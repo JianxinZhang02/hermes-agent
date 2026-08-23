@@ -2099,7 +2099,67 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
         agent._apply_pending_steer_to_tool_results(messages, total_tools)
 
 
+def execute_tool_call_batch(
+    agent,
+    assistant_message,
+    messages: list,
+    effective_task_id: str,
+    api_call_count: int = 0,
+) -> None:
+    """Execute one assistant tool-call batch through Hermes' normal dispatch.
+
+    This internal entry point is shared by the native ReAct loop and PlanIR.
+    It preserves the existing segmentation, persistence, guardrail, approval,
+    and result-handling behavior without making PlanIR depend on an
+    ``AIAgent`` private method.
+    """
+    tool_calls = assistant_message.tool_calls
+    agent._executing_tools = True
+    try:
+        if len(tool_calls) <= 1:
+            return agent._execute_tool_calls_sequential(
+                assistant_message,
+                messages,
+                effective_task_id,
+                api_call_count,
+            )
+
+        active_env = get_active_env(effective_task_id)
+        execution_cwd = (
+            Path(active_env.cwd) if active_env is not None and active_env.cwd else None
+        )
+        segments = _plan_tool_batch_segments(
+            tool_calls,
+            execution_cwd=execution_cwd,
+        )
+        if len(segments) == 1:
+            if segments[0][0] == "parallel":
+                return agent._execute_tool_calls_concurrent(
+                    assistant_message,
+                    messages,
+                    effective_task_id,
+                    api_call_count,
+                )
+            return agent._execute_tool_calls_sequential(
+                assistant_message,
+                messages,
+                effective_task_id,
+                api_call_count,
+            )
+        return execute_tool_calls_segmented(
+            agent,
+            assistant_message,
+            messages,
+            effective_task_id,
+            api_call_count,
+            segments=segments,
+        )
+    finally:
+        agent._executing_tools = False
+
+
 __all__ = [
+    "execute_tool_call_batch",
     "execute_tool_calls_concurrent",
     "execute_tool_calls_sequential",
     "execute_tool_calls_segmented",
