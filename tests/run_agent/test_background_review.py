@@ -134,7 +134,28 @@ def test_background_review_fork_opts_out_of_session_finalization(monkeypatch):
 
 import json as _json
 
-from agent.background_review import summarize_background_review_actions
+from agent.background_review import (
+    _COMBINED_REVIEW_PROMPT,
+    _SKILL_REVIEW_PROMPT,
+    summarize_background_review_actions,
+)
+
+
+def test_skill_review_prompts_share_anti_overfit_quality_constraints():
+    required_constraints = (
+        "ANTI-OVERFIT EVIDENCE GATE",
+        "already expresses the same method",
+        "newly observed question subtype is not a new method",
+        "at or below 800 words",
+        "ordinary QA, classification, and extraction",
+        "`## WHEN TO USE`",
+        "numbered procedure",
+        "`## LIMITATIONS`",
+    )
+
+    for prompt in (_SKILL_REVIEW_PROMPT, _COMBINED_REVIEW_PROMPT):
+        for constraint in required_constraints:
+            assert constraint in prompt
 
 
 def _memory_add_review():

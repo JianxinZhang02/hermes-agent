@@ -1,6 +1,7 @@
 import json
 
 from tools import skill_evidence as E
+from tools import skills_tool as S
 
 
 def _content(name: str, description: str = "Reusable product-management workflow") -> str:
@@ -142,3 +143,50 @@ def test_review_create_redirects_when_category_skill_already_landed(tmp_path, mo
     assert result["redirect_to_existing_skill"] == "decision-analysis-frameworks"
     assert "Patch or edit" in result["message"]
 
+
+def test_skills_list_exposes_pending_review_evidence_metadata(tmp_path, monkeypatch):
+    from tools.skill_provenance import (
+        BACKGROUND_REVIEW,
+        reset_current_write_origin,
+        set_current_write_origin,
+    )
+
+    monkeypatch.setattr(E, "_skills_dir", lambda: tmp_path)
+    monkeypatch.setattr(E, "evidence_threshold", lambda: 2)
+    monkeypatch.setattr(E, "_evidence_ttl_days", lambda: 14)
+    monkeypatch.setattr(S, "_skills_dir", lambda: tmp_path)
+    monkeypatch.setattr(S, "_find_all_skills", lambda: [])
+
+    session_token = E.set_current_session_key("session-a")
+    review_token = E.set_current_review_key("session-a:review:1")
+    try:
+        result = json.loads(E.gate_review_create(
+            "context-grounded-extraction",
+            "qa-extraction",
+            _content(
+                "context-grounded-extraction",
+                "Extract concise answers from supplied evidence",
+            ),
+        ))
+        assert result["deferred"] is True
+    finally:
+        E.reset_current_review_key(review_token)
+        E.reset_current_session_key(session_token)
+
+    origin_token = set_current_write_origin(BACKGROUND_REVIEW)
+    try:
+        listed = json.loads(S.skills_list())
+    finally:
+        reset_current_write_origin(origin_token)
+
+    assert listed["pending_review_candidates"] == [{
+        "name": "context-grounded-extraction",
+        "category": "qa-extraction",
+        "description": "Extract concise answers from supplied evidence",
+        "evidence": "1/2",
+        "evidence_count": 1,
+        "threshold": 2,
+        "evidence_unit": "review_window",
+        "ready_to_create": False,
+        "umbrella_for": [],
+    }]

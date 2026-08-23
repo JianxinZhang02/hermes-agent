@@ -801,11 +801,17 @@ def _pending_review_evidence(category: str = None) -> List[Dict[str, Any]]:
             if category and candidate_category != category:
                 continue
             keys = record.get("evidence_keys") or record.get("sessions") or []
+            evidence_count = len(set(keys))
             pending.append({
                 "name": name,
                 "category": candidate_category,
-                "evidence_count": len(set(keys)),
+                "description": record.get("description") or "",
+                "evidence": f"{evidence_count}/{threshold}",
+                "evidence_count": evidence_count,
                 "threshold": threshold,
+                "evidence_unit": "review_window",
+                "ready_to_create": bool(record.get("ready_to_create")),
+                "umbrella_for": record.get("umbrella_for") or [],
             })
         return pending
     except Exception:
