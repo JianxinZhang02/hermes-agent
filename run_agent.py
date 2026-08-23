@@ -1811,12 +1811,69 @@ class AIAgent:
             review_memory=review_memory,
             review_skills=review_skills,
         )
-        # Carry the active profile into the review thread so MEMORY.md / skill
-        # review writes land in the right profile (#54937).
+        # Some tests and embedders construct a lightweight AIAgent via
+        # ``__new__``. Lazily install the bookkeeping in that compatible path;
+        # regular agents receive it from init_agent.
+        if not hasattr(self, "_background_review_threads_lock"):
+            self._background_review_threads = set()
+            self._background_review_threads_lock = threading.Lock()
+            self._background_review_started = 0
+            self._background_review_completed = 0
+        lock = self._background_review_threads_lock
+
+        def _tracked_target() -> None:
+            try:
+                target()
+            finally:
+                with lock:
+                    self._background_review_threads.discard(t)
+                    self._background_review_completed += 1
+
+        # Carry all active ContextVars (profile, provenance, evidence session,
+        # runtime cwd) into the review thread.  The target then binds a unique
+        # review-window key so retries in one review cast only one vote.
         t = threading.Thread(
-            target=propagate_context_to_thread(target), daemon=True, name="bg-review"
+            target=propagate_context_to_thread(_tracked_target),
+            daemon=True,
+            name="bg-review",
         )
+        with lock:
+            self._background_review_threads.add(t)
+            self._background_review_started += 1
         t.start()
+
+    def wait_for_background_reviews(self, timeout: float = 30.0) -> Dict[str, Any]:
+        """Wait only for reviews spawned by this agent, within one deadline."""
+        lock = getattr(self, "_background_review_threads_lock", None)
+        if lock is None:
+            return {"started": 0, "completed": 0, "pending": 0, "timed_out": False}
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with lock:
+                threads = list(self._background_review_threads)
+            if not threads:
+                break
+            for thread in threads:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=remaining)
+            if time.monotonic() >= deadline:
+                break
+
+        with lock:
+            dead = {thread for thread in self._background_review_threads if not thread.is_alive()}
+            self._background_review_threads.difference_update(dead)
+            pending = len(self._background_review_threads)
+            started = int(self._background_review_started)
+            completed = int(self._background_review_completed)
+        return {
+            "started": started,
+            "completed": completed,
+            "pending": pending,
+            "timed_out": pending > 0,
+        }
 
     def _build_memory_write_metadata(
         self,

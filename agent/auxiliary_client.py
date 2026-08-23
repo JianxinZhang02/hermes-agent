@@ -7352,6 +7352,18 @@ def _resolve_task_provider_model(
     resolved_model = model or cfg_model
     resolved_api_mode = cfg_api_mode
 
+    # Goal Judge receives current-turn tool evidence. Keep endpoint and key on
+    # the active main-model trust boundary; configuration may select another
+    # model on that same API but may not silently reroute evidence elsewhere.
+    if task == "goal_judge" and not provider and not base_url and not api_key:
+        return (
+            "main",
+            resolved_model or _read_main_model() or None,
+            None,
+            None,
+            resolved_api_mode,
+        )
+
     # MoA virtual provider: an *explicit* `provider: moa` override (either the
     # caller-passed `provider` arg or `auxiliary.<task>.provider` in
     # config.yaml) reaches this function directly — it never goes through

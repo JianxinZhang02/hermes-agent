@@ -1,0 +1,11 @@
+name: skill_training
+version: 0.1.0
+description: "Operator CLI for reference- and binary-feedback skill training sessions."
+author: Lenovo
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+
+

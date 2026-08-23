@@ -5289,6 +5289,12 @@ class TurnRunner:
                 "conversation_history": agent_history,
                 "task_id": ctx.session_id,
             }
+            try:
+                from hermes_cli.goals import collect_tool_call_ids
+
+                _goal_before_tool_ids = collect_tool_call_ids(agent_history)
+            except Exception:
+                _goal_before_tool_ids = set()
             if _persist_user_message_override is not None:
                 _conversation_kwargs["persist_user_message"] = _persist_user_message_override
             elif observed_group_context:
@@ -5298,6 +5304,14 @@ class TurnRunner:
             if _persist_user_timestamp_override is not None:
                 _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
             result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+            try:
+                from hermes_cli.goals import extract_tool_evidence
+
+                result["_goal_tool_evidence"] = extract_tool_evidence(
+                    result.get("messages") or [], _goal_before_tool_ids
+                )
+            except Exception:
+                result["_goal_tool_evidence"] = []
         finally:
             unregister_gateway_notify(_approval_session_key)
             # Cancel any pending clarify entries so blocked agent
@@ -5461,6 +5475,7 @@ class TurnRunner:
                 "interrupt_message": result.get("interrupt_message"),
                 "error": result.get("error"),
                 "compression_exhausted": result.get("compression_exhausted", False),
+                "_goal_tool_evidence": result.get("_goal_tool_evidence", []),
                 "compression_deferred": result.get("compression_deferred", False),
                 "tools": ctx.tools_holder[0] or [],
                 "history_offset": _effective_history_offset,
@@ -5612,6 +5627,7 @@ class TurnRunner:
             "session_id": effective_session_id,
             "response_previewed": result.get("response_previewed", False),
             "response_transformed": result.get("response_transformed", False),
+            "_goal_tool_evidence": result.get("_goal_tool_evidence", []),
             # Pass through the agent_persisted flag so the persistence block
             # above can correctly determine whether the codex app-server path
             # self-persisted (it didn't — see codex_runtime.py).  Default
@@ -15556,8 +15572,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _final_text = ""
                 if isinstance(_agent_result, dict):
                     _final_text = str(_agent_result.get("final_response") or "")
+                    _goal_tool_evidence = _agent_result.pop("_goal_tool_evidence", None)
                 elif isinstance(_agent_result, str):
                     _final_text = _agent_result
+                    _goal_tool_evidence = None
+                else:
+                    _goal_tool_evidence = None
                 # Skip for empty responses (interrupted / errored) — the
                 # judge would almost always say "continue" and we'd loop
                 # on error. Let the user drive the next turn.
@@ -15571,6 +15591,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             session_entry=session_entry,
                             source=source,
                             final_response=_final_text,
+                            tool_evidence=_goal_tool_evidence,
                         )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
@@ -18613,6 +18634,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_entry: Any,
         source: Any,
         final_response: str,
+        tool_evidence: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Run the goal judge after a gateway turn and, if still active,
         enqueue a continuation prompt for the same session.
@@ -18646,10 +18668,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             _bg_procs = None
 
+        try:
+            from hermes_cli.goal_verification import build_goal_verification_runner
+
+            session_key = self._session_key_for_source(source)
+            verification_runner = build_goal_verification_runner(
+                self._running_agents.get(session_key)
+            )
+        except Exception:
+            verification_runner = None
+
         decision = mgr.evaluate_after_turn(
             final_response or "",
             user_initiated=True,
             background_processes=_bg_procs,
+            tool_evidence=tool_evidence,
+            verification_runner=verification_runner,
         )
         msg = decision.get("message") or ""
 

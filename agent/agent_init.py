@@ -801,6 +801,13 @@ def init_agent(
     # their tids explicitly.
     agent._tool_worker_threads: set[int] = set()
     agent._tool_worker_threads_lock = threading.Lock()
+
+    # Per-agent background-review tracking lets non-interactive callers wait
+    # for durable skill/evidence writes without enumerating process threads.
+    agent._background_review_threads: set[threading.Thread] = set()
+    agent._background_review_threads_lock = threading.Lock()
+    agent._background_review_started = 0
+    agent._background_review_completed = 0
     
     # Subagent delegation state
     agent._delegate_depth = 0        # 0 = top-level agent, incremented for children

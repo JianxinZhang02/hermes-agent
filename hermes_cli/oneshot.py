@@ -310,6 +310,111 @@ def _create_session_db_for_oneshot():
         return None
 
 
+def build_noninteractive_agent(
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    toolsets: object = None,
+    use_config_toolsets: bool = True,
+    *,
+    ephemeral_system_prompt: Optional[str] = None,
+    max_iterations: int = 90,
+    skip_context_files: bool = False,
+    skip_memory: bool = False,
+    load_soul_identity: bool = False,
+    save_trajectories: bool = False,
+    use_session_db: bool = True,
+):
+    """Build a quiet agent using the same runtime resolution as ``hermes -z``.
+
+    The caller owns shutdown. This explicit surface is used by bounded
+    non-interactive workflows such as skill training, which need several
+    turns on one agent rather than the single-turn ``_run_agent`` lifecycle.
+    """
+    from hermes_cli.config import load_config
+    from hermes_cli.models import detect_provider_for_model
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_cli.tools_config import _get_platform_tools
+    from run_agent import AIAgent
+
+    cfg = load_config()
+    model_cfg = cfg.get("model") or {}
+    cfg_model = model_cfg if isinstance(model_cfg, str) else (model_cfg.get("default") or model_cfg.get("model") or "")
+    env_model = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
+    effective_model = (model or "").strip() or env_model or cfg_model
+    effective_provider = (provider or "").strip() or None
+    explicit_base_url = None
+    if effective_provider is None and (model or env_model):
+        explicit_model = (model or "").strip() or env_model
+        try:
+            from hermes_cli import model_switch as _ms
+
+            _ms._ensure_direct_aliases()
+            direct = _ms.DIRECT_ALIASES.get(explicit_model.lower())
+        except Exception:
+            direct = None
+        if direct is not None:
+            effective_model = direct.model
+            effective_provider = direct.provider
+            explicit_base_url = direct.base_url.rstrip("/") if direct.base_url else None
+        else:
+            cfg_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
+            detected = detect_provider_for_model(
+                explicit_model,
+                cfg_provider or os.getenv("HERMES_INFERENCE_PROVIDER", "").strip().lower() or "auto",
+            )
+            if detected:
+                effective_provider, effective_model = detected
+
+    runtime = resolve_runtime_provider(
+        requested=effective_provider,
+        target_model=effective_model or None,
+        explicit_base_url=explicit_base_url,
+    )
+    toolsets_list = _normalize_toolsets(toolsets)
+    if toolsets_list is None and use_config_toolsets:
+        toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
+
+    from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
+
+    ensure_mcp_discovery_before_agent_build(
+        logger=logging.getLogger(__name__), single_query=True
+    )
+    session_db = _create_session_db_for_oneshot() if use_session_db else None
+    try:
+        agent = AIAgent(
+            api_key=runtime.get("api_key"),
+            base_url=runtime.get("base_url"),
+            provider=runtime.get("provider"),
+            requested_provider=runtime.get("requested_provider"),
+            api_mode=runtime.get("api_mode"),
+            model=effective_model,
+            enabled_toolsets=toolsets_list,
+            quiet_mode=True,
+            platform="cli",
+            session_db=session_db,
+            credential_pool=runtime.get("credential_pool"),
+            fallback_model=get_fallback_chain(cfg) or None,
+            ephemeral_system_prompt=ephemeral_system_prompt,
+            max_iterations=max_iterations,
+            skip_context_files=skip_context_files,
+            skip_memory=skip_memory,
+            load_soul_identity=load_soul_identity,
+            save_trajectories=save_trajectories,
+            clarify_callback=_oneshot_clarify_callback,
+        )
+    except Exception:
+        if session_db is not None:
+            session_db.close()
+        raise
+    agent.suppress_status_output = True
+    agent.stream_delta_callback = None
+    agent.tool_gen_callback = None
+    # Expose ownership for multi-turn non-interactive callers that requested a
+    # DB. AIAgent.close ends sessions but does not close this connection.
+    agent._noninteractive_owned_session_db = session_db
+    return agent
+
+
 def _run_agent(
     prompt: str,
     model: Optional[str] = None,

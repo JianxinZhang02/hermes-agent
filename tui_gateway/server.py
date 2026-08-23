@@ -9615,7 +9615,23 @@ def _run_prompt_submit(
             if display_kind and "persist_user_display_kind" in _run_params:
                 run_kwargs["persist_user_display_kind"] = display_kind
                 run_kwargs["persist_user_display_metadata"] = display_metadata
+            try:
+                from hermes_cli.goals import collect_tool_call_ids
+
+                goal_before_tool_ids = collect_tool_call_ids(history)
+            except Exception:
+                goal_before_tool_ids = set()
             result = agent.run_conversation(run_message, **run_kwargs)
+            goal_tool_evidence = []
+            if isinstance(result, dict):
+                try:
+                    from hermes_cli.goals import extract_tool_evidence
+
+                    goal_tool_evidence = extract_tool_evidence(
+                        result.get("messages") or [], goal_before_tool_ids
+                    )
+                except Exception:
+                    goal_tool_evidence = []
             if display_kind and isinstance(text, str):
                 db = getattr(agent, "_session_db", None)
                 current_session_id = getattr(agent, "session_id", None) or session.get("session_key")
@@ -9854,10 +9870,18 @@ def _run_prompt_submit(
                                 _bg_procs = _gather_bg()
                             except Exception:
                                 _bg_procs = None
+                            try:
+                                from hermes_cli.goal_verification import build_goal_verification_runner
+
+                                verification_runner = build_goal_verification_runner(agent)
+                            except Exception:
+                                verification_runner = None
                             decision = goal_mgr.evaluate_after_turn(
                                 raw,
                                 user_initiated=True,
                                 background_processes=_bg_procs,
+                                tool_evidence=goal_tool_evidence,
+                                verification_runner=verification_runner,
                             )
                             verdict_msg = decision.get("message") or ""
                             if verdict_msg:

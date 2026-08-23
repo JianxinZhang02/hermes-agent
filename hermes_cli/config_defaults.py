@@ -987,9 +987,10 @@ DEFAULT_CONFIG = {
         },
         # Goal judge — evaluates whether a /goal run's latest response
         # satisfies the goal/contract, and drafts goal contracts. Short
-        # structured-JSON calls; a fast cheap model is fine.
+        # structured-JSON calls. Tool evidence must remain on the active main
+        # API trust boundary; ``model`` may select another model there.
         "goal_judge": {
-            "provider": "auto",
+            "provider": "main",
             "model": "",
             "base_url": "",
             "api_key": "",
@@ -1797,6 +1798,12 @@ DEFAULT_CONFIG = {
     # always goes to ~/.hermes/skills/.
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
+        # Autonomous background review must see a reusable skill class in this
+        # many independent review windows before creating it. Foreground
+        # user-directed creates and review updates are unaffected.
+        "evidence_threshold": 2,
+        # Opportunistically prune candidates that never recur.
+        "evidence_ttl_days": 14,
         # Substitute ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID} in SKILL.md
         # content with the absolute skill directory and the active session id
         # before the agent sees it.  Lets skill authors reference bundled

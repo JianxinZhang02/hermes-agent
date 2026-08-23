@@ -783,6 +783,63 @@ def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
 
 
+def _pending_review_evidence(category: str = None) -> List[Dict[str, Any]]:
+    """Expose ungraduated candidates only inside a background review."""
+    try:
+        from tools.skill_provenance import is_background_review
+
+        if not is_background_review():
+            return []
+        from tools import skill_evidence
+
+        threshold = skill_evidence.evidence_threshold()
+        pending: List[Dict[str, Any]] = []
+        for name, record in sorted(skill_evidence.load_evidence().items()):
+            if record.get("graduated_at"):
+                continue
+            candidate_category = record.get("category") or None
+            if category and candidate_category != category:
+                continue
+            keys = record.get("evidence_keys") or record.get("sessions") or []
+            pending.append({
+                "name": name,
+                "category": candidate_category,
+                "evidence_count": len(set(keys)),
+                "threshold": threshold,
+            })
+        return pending
+    except Exception:
+        logger.debug("failed to list pending review evidence", exc_info=True)
+        return []
+
+
+def _review_hygiene_existing_skills(skills: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Normalize only agent-created skills while the review fork lists them."""
+    try:
+        from tools.skill_provenance import is_background_review
+
+        if not is_background_review():
+            return {}
+        from tools import skill_usage
+        from tools.skill_manager_tool import _normalize_review_skill_file
+
+        changed: Dict[str, int] = {}
+        for skill in skills:
+            name = str(skill.get("name") or "").strip()
+            if not name:
+                continue
+            record = skill_usage.get_record(name)
+            if record.get("created_by") != "agent" and record.get("agent_created") is not True:
+                continue
+            rewrites = _normalize_review_skill_file(name, drop_missing_refs=True)
+            if rewrites:
+                changed[name] = rewrites
+        return changed
+    except Exception:
+        logger.debug("failed to run background-review skill hygiene", exc_info=True)
+        return {}
+
+
 def skills_list(category: str = None, task_id: str = None) -> str:
     """
     List all available skills (progressive disclosure tier 1 - minimal metadata).
@@ -811,16 +868,24 @@ def skills_list(category: str = None, task_id: str = None) -> str:
                 ensure_ascii=False,
             )
 
-        # Find all skills
+        # Find landed skills and, for the autonomous review fork only, pending
+        # recurrence candidates that may match this review window.
         all_skills = _find_all_skills()
+        review_hygiene_normalized = _review_hygiene_existing_skills(all_skills)
+        pending_review_candidates = _pending_review_evidence(category)
 
         if not all_skills:
             return json.dumps(
                 {
                     "success": True,
                     "skills": [],
-                    "categories": [],
-                    "message": "No skills found in skills/ directory.",
+                    "categories": sorted({p.get("category") for p in pending_review_candidates if p.get("category")}),
+                    "pending_review_candidates": pending_review_candidates,
+                    "message": (
+                        "No landed skills found. Pending review candidates are evidence only; "
+                        "reuse an exact candidate name only when this review independently repeats its class."
+                        if pending_review_candidates else "No skills found in skills/ directory."
+                    ),
                 },
                 ensure_ascii=False,
             )
@@ -835,6 +900,7 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         # Extract unique categories
         categories = sorted(
             {s.get("category") for s in all_skills if s.get("category")}
+            | {p.get("category") for p in pending_review_candidates if p.get("category")}
         )
 
         return json.dumps(
@@ -842,6 +908,8 @@ def skills_list(category: str = None, task_id: str = None) -> str:
                 "success": True,
                 "skills": all_skills,
                 "categories": categories,
+                "pending_review_candidates": pending_review_candidates,
+                "review_hygiene_normalized": review_hygiene_normalized,
                 "count": len(all_skills),
                 "hint": "Use skill_view(name) to see full content, tags, and linked files",
             },

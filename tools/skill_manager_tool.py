@@ -1460,6 +1460,72 @@ def apply_skill_pending(payload: Dict[str, Any]) -> str:
         _skill_gate_bypass.reset(token)
 
 
+_SUPPORT_REF_RE = re.compile(r"\b(?:references|templates|scripts|assets)/[^\s)`'\"<>]+")
+
+
+def _drop_missing_support_refs(content: str, skill_dir: Path) -> Tuple[str, int]:
+    """Drop review-authored lines whose referenced support file is absent."""
+    kept: List[str] = []
+    removed = 0
+    for line in (content or "").splitlines(keepends=True):
+        refs = [match.group(0).rstrip(".,;:") for match in _SUPPORT_REF_RE.finditer(line)]
+        missing = [ref for ref in refs if not (skill_dir / ref).exists()]
+        if missing:
+            removed += len(missing)
+            continue
+        kept.append(line)
+    return "".join(kept), removed
+
+
+def _normalize_review_skill_file(name: str, *, drop_missing_refs: bool = False) -> int:
+    """Best-effort deterministic hygiene for one review-owned SKILL.md."""
+    try:
+        existing = _find_skill(name)
+        if not existing:
+            return 0
+        skill_dir = existing["path"]
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            return 0
+        original = skill_md.read_text(encoding="utf-8")
+        from tools.skill_evidence import normalize_review_skill_md
+
+        normalized, rewrites = normalize_review_skill_md(original)
+        if drop_missing_refs:
+            normalized, dropped = _drop_missing_support_refs(normalized, skill_dir)
+            rewrites += dropped
+        if not rewrites or normalized == original:
+            return 0
+        error = _validate_frontmatter(normalized) or _validate_content_size(normalized)
+        if error:
+            logger.debug("review hygiene skipped for %s: %s", name, error)
+            return 0
+        atomic_write_text(skill_md, normalized)
+        scan_error = _security_scan_skill(skill_dir)
+        if scan_error:
+            atomic_write_text(skill_md, original)
+            return 0
+        return rewrites
+    except Exception:
+        logger.debug("review skill hygiene failed open for %s", name, exc_info=True)
+        return 0
+
+
+def _maybe_normalize_redirected_skill(deferred: str) -> str:
+    """Normalize a landed umbrella when candidate evidence redirects to it."""
+    try:
+        payload = json.loads(deferred)
+        target = str(payload.get("redirect_to_existing_skill") or "").strip()
+        if not target:
+            return deferred
+        rewrites = _normalize_review_skill_file(target, drop_missing_refs=True)
+        if rewrites:
+            payload["review_hygiene_normalized"] = rewrites
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return deferred
+
+
 # Debounce state for the sync push hook. A burst of skill_manage writes
 # (e.g. create + several write_file calls) collapses into a single push after
 # a short quiet window, on a daemon timer so the agent write never blocks.
@@ -1544,6 +1610,32 @@ def skill_manage(
     if gate_result is not None:
         return gate_result
 
+    # Background-review writes are autonomous and therefore use a stricter
+    # hygiene/evidence boundary than foreground, user-directed writes.  Scrub
+    # instance-specific figures from every review payload and defer a new skill
+    # until the same class recurs in independent review windows.  Best-effort:
+    # failures in evidence bookkeeping must not break the existing write path.
+    review_write = False
+    try:
+        from tools.skill_provenance import is_background_review
+
+        review_write = is_background_review()
+        if review_write:
+            from tools.skill_evidence import gate_review_create, scrub_instance_figures
+
+            if content:
+                content = scrub_instance_figures(content)[0]
+            if new_string:
+                new_string = scrub_instance_figures(new_string)[0]
+            if file_content:
+                file_content = scrub_instance_figures(file_content)[0]
+            if action == "create" and content:
+                deferred = gate_review_create(name, category, content)
+                if deferred is not None:
+                    return _maybe_normalize_redirected_skill(deferred)
+    except Exception:
+        logger.debug("background-review skill evidence gate failed open", exc_info=True)
+
     if action == "create":
         if not content:
             return tool_error("content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).", success=False)
@@ -1578,6 +1670,13 @@ def skill_manage(
 
     else:
         result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
+
+    if result.get("success") and review_write and action in {"create", "edit", "patch", "write_file"}:
+        rewrites = _normalize_review_skill_file(
+            name, drop_missing_refs=action in {"edit", "patch"}
+        )
+        if rewrites:
+            result["review_hygiene_normalized"] = rewrites
 
     if result.get("success"):
         try:

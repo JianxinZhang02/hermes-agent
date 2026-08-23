@@ -179,13 +179,31 @@ _MEMORY_REVIEW_PROMPT = (
     "If nothing is worth saving, just say 'Nothing to save.' and stop."
 )
 
+_SKILL_ANTI_OVERFIT_GUARDRAILS = (
+    "ANTI-OVERFIT EVIDENCE GATE -- apply before every skill_manage call:\n"
+    "1. Conversation prompts, answers, labels, evaluator feedback, proper nouns, "
+    "dates and numbers are evidence, never reusable skill text.\n"
+    "2. Write only for a non-obvious transferable method repeated across distinct "
+    "tasks in this review, an explicit transferable correction, or a reproducible "
+    "general defect in an existing skill. Task volume alone is not evidence.\n"
+    "3. Abstract all instance wording before writing. If a reader could reconstruct "
+    "a task or answer, do not save it.\n"
+    "4. Prefer one small replacement, consolidation or deletion. Do not create "
+    "question catalogs, answer banks, trajectories or session case files.\n"
+    "5. Keep SKILL.md at or below 800 words; support files are only for stable, "
+    "independently reusable material.\n"
+    "If any check fails, say 'Nothing to save.' and stop.\n\n"
+)
+
 _SKILL_REVIEW_PROMPT = (
-    "Review the conversation above and update the skill library. Be "
-    "ACTIVE — most sessions produce at least one skill update, even if "
-    "small. A pass that does nothing is a missed learning opportunity, "
-    "not a neutral outcome.\n\n"
-    "Target shape of the library: CLASS-LEVEL skills, each with a rich "
-    "SKILL.md and a `references/` directory for session-specific detail. "
+    "Review the conversation above and update the skill library only when "
+    "the session produced durable, reusable learning. Be selective: task "
+    "volume alone never warrants an update, and 'Nothing to save.' is a "
+    "valid outcome. A narrow or session-bound skill is worse than no skill.\n\n"
+    + _SKILL_ANTI_OVERFIT_GUARDRAILS
+    +
+    "Target shape of the library: compact CLASS-LEVEL skills with optional "
+    "support files only for independently reusable material. "
     "Not a long flat list of narrow one-session-one-skill entries. This "
     "shapes HOW you update, not WHETHER you update.\n\n"
     "Signals to look for (any one of these warrants action):\n"
@@ -204,8 +222,8 @@ _SKILL_REVIEW_PROMPT = (
     "from. Capture it.\n"
     "  • A skill that got loaded or consulted this session turned out "
     "to be wrong, missing a step, or outdated. Patch it NOW.\n\n"
-    "Preference order — prefer the earliest action that fits, but do "
-    "pick one when a signal above fired:\n"
+    "Preference order — prefer the earliest action that fits. If none meets "
+    "the durable class-level bar, say 'Nothing to save.':\n"
     "  1. UPDATE A CURRENTLY-LOADED SKILL. Look back through the "
     "conversation for skills the user loaded via /skill-name or you "
     "read via skill_view. If any of them covers the territory of the "
@@ -217,15 +235,16 @@ _SKILL_REVIEW_PROMPT = (
     "  2. UPDATE AN EXISTING UMBRELLA (via skills_list + skill_view). "
     "If no loaded skill fits but an existing class-level skill does, "
     "patch it. Add a subsection, a pitfall, or broaden a trigger.\n"
-    "  3. ADD A SUPPORT FILE under an existing umbrella. Skills can be "
+    "     During background review, skills_list may include "
+    "pending_review_candidates. They are evidence, not landed skills; if "
+    "this review independently repeats one, use its exact candidate name.\n"
+    "  3. ADD A SUPPORT FILE under an existing umbrella only for stable, "
+    "independently reusable material. Skills can be "
     "packaged with three kinds of support files — use the right "
     "directory per kind:\n"
-    "     • `references/<topic>.md` — session-specific detail (error "
-    "transcripts, reproduction recipes, provider quirks) AND "
-    "condensed knowledge banks: quoted research, API docs, external "
-    "authoritative excerpts, or domain notes you found while working "
-    "on the problem. Write it concise and for the value of the task, "
-    "not as a full mirror of upstream docs.\n"
+    "     • `references/<topic>.md` — concise authoritative API docs or "
+    "stable domain notes. Never store conversation-derived questions, "
+    "answers, transcripts, case histories, or task-pattern catalogs.\n"
     "     • `templates/<name>.<ext>` — starter files meant to be "
     "copied and modified (boilerplate configs, scaffolding, a "
     "known-good example the agent can `reproduce with modifications`).\n"
@@ -310,11 +329,13 @@ _COMBINED_REVIEW_PROMPT = (
     "desires, preferences, personal details, or expectations about "
     "how you should behave? Save facts about the user and durable "
     "preferences with the memory tool.\n\n"
-    "**Skills**: how to do this class of task. Be ACTIVE — most "
-    "sessions produce at least one skill update. A pass that does "
-    "nothing is a missed learning opportunity, not a neutral outcome.\n\n"
-    "Target shape of the skill library: CLASS-LEVEL skills with a rich "
-    "SKILL.md and a `references/` directory for session-specific detail. "
+    "**Skills**: how to do this class of task. Task volume alone never "
+    "warrants an update; 'Nothing to save.' is a valid outcome. A narrow "
+    "or session-bound skill is worse than no skill.\n\n"
+    + _SKILL_ANTI_OVERFIT_GUARDRAILS
+    +
+    "Target shape of the skill library: compact CLASS-LEVEL skills with "
+    "optional support files only for independently reusable material. "
     "Not a long flat list of narrow one-session-one-skill entries.\n\n"
     "Signals that warrant a skill update (any one is enough):\n"
     "  • User corrected your style, tone, format, legibility, "
@@ -335,11 +356,14 @@ _COMBINED_REVIEW_PROMPT = (
     "through when one of those is the best fit.\n"
     "  2. UPDATE AN EXISTING UMBRELLA (skills_list + skill_view to "
     "find the right one). Patch it.\n"
-    "  3. ADD A SUPPORT FILE under an existing umbrella via "
-    "skill_manage action=write_file. Three kinds: "
-    "`references/<topic>.md` for session-specific detail OR condensed "
-    "knowledge banks (quoted research, API docs excerpts, domain "
-    "notes) written concise and task-focused; `templates/<name>.<ext>` "
+    "     During background review, skills_list may include "
+    "pending_review_candidates. They are evidence, not landed skills; if "
+    "this review independently repeats one, use its exact candidate name.\n"
+    "  3. ADD A SUPPORT FILE under an existing umbrella via skill_manage "
+    "action=write_file only for stable, independently reusable material. "
+    "`references/<topic>.md` may contain concise authoritative API docs or "
+    "stable domain notes, never conversation-derived tasks or answers; "
+    "`templates/<name>.<ext>` "
     "for starter files meant to be copied and modified; "
     "`scripts/<name>.<ext>` for statically re-runnable actions "
     "(verification, fixture generators, probes). Add a one-line "
@@ -914,6 +938,7 @@ def _run_review_in_thread(
             except Exception:
                 pass
 
+            _skill_review_token = None
             try:
                 # Routed to a different model -> replay a digest (cache is cold
                 # on that model anyway, so minimise cold-written tokens). Same
@@ -922,6 +947,17 @@ def _run_review_in_thread(
                     _digest_history(messages_snapshot) if _routed
                     else messages_snapshot
                 )
+                try:
+                    from tools.skill_evidence import (
+                        current_session_key,
+                        set_current_review_key,
+                    )
+
+                    _skill_review_token = set_current_review_key(
+                        f"{current_session_key()}:review:{uuid.uuid4().hex[:8]}"
+                    )
+                except Exception:
+                    _skill_review_token = None
                 review_agent.run_conversation(
                     user_message=(
                         prompt
@@ -932,6 +968,13 @@ def _run_review_in_thread(
                     conversation_history=_review_history,
                 )
             finally:
+                if _skill_review_token is not None:
+                    try:
+                        from tools.skill_evidence import reset_current_review_key
+
+                        reset_current_review_key(_skill_review_token)
+                    except Exception:
+                        pass
                 clear_thread_tool_whitelist()
 
             # Snapshot review actions before teardown. close() is allowed to

@@ -4637,6 +4637,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # don't auto-queue another continuation on top of a user-cancelled
         # turn (which would make Ctrl+C feel like it did nothing).
         self._last_turn_interrupted = False
+        self._last_turn_tool_evidence = []
         self._should_exit = False
         # /exit --delete: when True, the current session's SQLite history and
         # on-disk transcripts are deleted during shutdown. Set by
@@ -10759,10 +10760,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         except Exception:
             _bg_procs = None
 
+        try:
+            from hermes_cli.goal_verification import build_goal_verification_runner
+
+            verification_runner = build_goal_verification_runner(getattr(self, "agent", None))
+        except Exception:
+            verification_runner = None
+
         decision = mgr.evaluate_after_turn(
             last_response,
             user_initiated=True,
             background_processes=_bg_procs,
+            tool_evidence=getattr(self, "_last_turn_tool_evidence", None),
+            verification_runner=verification_runner,
         )
         msg = decision.get("message") or ""
         if msg:
@@ -13661,6 +13671,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # this to True. Early returns (credential refresh failure, etc.)
         # leave it False, which is correct — those aren't user interrupts.
         self._last_turn_interrupted = False
+        self._last_turn_tool_evidence = []
+        try:
+            from hermes_cli.goals import collect_tool_call_ids
+
+            goal_before_tool_ids = collect_tool_call_ids(self.conversation_history)
+        except Exception:
+            goal_before_tool_ids = set()
 
         # Refresh provider credentials if needed (handles key rotation transparently)
         if not self._ensure_runtime_credentials():
@@ -14181,6 +14198,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
             # Update history with full conversation
             self.conversation_history = result.get("messages", self.conversation_history) if result else self.conversation_history
+            if result:
+                try:
+                    from hermes_cli.goals import extract_tool_evidence
+
+                    self._last_turn_tool_evidence = extract_tool_evidence(
+                        result.get("messages") or [], goal_before_tool_ids
+                    )
+                except Exception:
+                    self._last_turn_tool_evidence = []
 
             # If auto-compression fired mid-turn, the agent created a new
             # continuation session and mutated self.agent.session_id. Sync
