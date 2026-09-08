@@ -106,7 +106,7 @@ def verify_llm_api(base_url, api_key, model_name, timeout=30):
 # ==================== 👇 在这里填写你的三要素 ====================
 
 API_URL = "https://api.deepseek.com/v1"   # 替换成你的 URL
-API_KEY = "sk-0d80b12eb8af4a48ba83a373b52554f3"  # 替换成你的 Key
+API_KEY = "sk-***"  # 替换成你的 Key
 MODEL_NAME = "deepseek-v4-flash"                             # 替换成你的模型名
 
 # ============================================================
